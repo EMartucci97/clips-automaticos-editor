@@ -1,8 +1,11 @@
 """Local transcription via faster-whisper.
 
 Reads a local media file and returns the same shape the highlight generator
-expects: {duration, segments[start, end, text]}.
+expects: {duration, segments[start, end, text]}. Each segment also carries
+word-level timestamps (segment["words"] = [{start, end, word}, ...]) used
+downstream to burn word-by-word subtitles onto the rendered clips.
 """
+import json
 import os
 import re
 from pathlib import Path
@@ -16,6 +19,13 @@ def _transcript_cache_path(media_path: str) -> Path:
     cache_dir = Path(LOCAL_OUTPUT_DIR)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / (Path(media_path).stem + ".srt")
+
+
+def _words_cache_path(media_path: str) -> Path:
+    """Return the sidecar .words.json cache path (word-level timestamps)."""
+    cache_dir = Path(LOCAL_OUTPUT_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / (Path(media_path).stem + ".words.json")
 
 
 def _format_srt_timestamp(seconds: float) -> str:
@@ -96,8 +106,10 @@ def _resolve_device() -> str:
 
 
 def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
-    """Run faster-whisper on a local file path, caching the result as .srt."""
+    """Run faster-whisper on a local file path, caching the result as .srt
+    (+ a sidecar .words.json with word-level timestamps for subtitles)."""
     cache_path = _transcript_cache_path(media_path)
+    words_path = _words_cache_path(media_path)
     if cache_path.exists():
         source_mtime = os.path.getmtime(media_path)
         cache_mtime = cache_path.stat().st_mtime
@@ -108,7 +120,15 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
             if not cached["segments"] or cached["duration"] <= 0.0:
                 print(f"[transcribe/local] cache is empty/invalid, deleting: {cache_path}", flush=True)
                 cache_path.unlink(missing_ok=True)
+                words_path.unlink(missing_ok=True)
             else:
+                if words_path.exists():
+                    try:
+                        words_by_segment = json.loads(words_path.read_text(encoding="utf-8"))
+                        for seg, words in zip(cached["segments"], words_by_segment):
+                            seg["words"] = words
+                    except (json.JSONDecodeError, OSError):
+                        pass
                 print(
                     f"[transcribe/local] {len(cached['segments'])} cached segments, "
                     f"{cached['duration']:.0f}s of audio",
@@ -137,6 +157,7 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
         "language": language,
         "beam_size": 5,
         "condition_on_previous_text": False,
+        "word_timestamps": True,
     }
     if LOCAL_WHISPER_VAD_FILTER:
         transcribe_kwargs["vad_filter"] = True
@@ -147,16 +168,24 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
     segments_iter, info = model.transcribe(**transcribe_kwargs)
 
     segments = []
+    words_by_segment = []
     for s in segments_iter:
         segments.append({
             "start": float(s.start),
             "end": float(s.end),
             "text": (s.text or "").strip(),
         })
+        words_by_segment.append([
+            {"start": float(w.start), "end": float(w.end), "word": w.word.strip()}
+            for w in (s.words or [])
+        ])
 
     duration = float(getattr(info, "duration", 0.0)) or (segments[-1]["end"] if segments else 0.0)
     print(f"[transcribe/local] {len(segments)} segments, {duration:.0f}s of audio", flush=True)
     transcript = {"duration": duration, "segments": segments}
     cache_path = _write_srt_cache(media_path, transcript)
+    words_path.write_text(json.dumps(words_by_segment), encoding="utf-8")
     print(f"[transcribe/local] wrote cache: {cache_path}", flush=True)
+    for seg, words in zip(segments, words_by_segment):
+        seg["words"] = words
     return transcript

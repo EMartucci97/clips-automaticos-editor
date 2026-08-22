@@ -140,6 +140,25 @@ python main.py "/Users/you/Videos/input.mp4" --mode local
 python main.py "file:///Users/you/Videos/input.mp4" --mode local
 ```
 
+### Google Drive
+
+In `--mode local`, you can also point at a Google Drive share link instead of
+YouTube — either a single file or a whole folder. The file/folder must be
+shared as **"Anyone with the link"** (Viewer is enough); this uses `gdown`,
+which downloads the same way a signed-out browser would (no OAuth setup).
+
+```bash
+# single file
+python main.py "https://drive.google.com/file/d/XXXXXXXXXXXXXXXXXXXX/view" --mode local
+
+# whole folder — downloads every video in it and runs the full pipeline
+# (download → transcribe → highlights → crop → subtitles) on each one
+python main.py "https://drive.google.com/drive/folders/XXXXXXXXXXXXXXXXXXXX" --mode local --num-clips 3
+```
+
+When the input is a folder, `generate_shorts()` / the CLI returns one result
+per video instead of a single result — see `result["batch"]` / `result["results"]`.
+
 The Python API works the same way:
 
 ```python

@@ -19,6 +19,17 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
 LOCAL_WHISPER_MODEL = os.getenv("LOCAL_WHISPER_MODEL", "base")
 LOCAL_WHISPER_DEVICE = os.getenv("LOCAL_WHISPER_DEVICE", "auto")  # auto / cpu / cuda
 LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR", "output")
+LOCAL_SUBTITLES_ENABLED = os.getenv("LOCAL_SUBTITLES_ENABLED", "true").strip().lower() == "true"
+
+# When enabled, the highlight LLM also scores each candidate against a set of
+# proven sales angles (in addition to generic virality) and the two scores
+# are blended for the final ranking. See shorts_generator/highlights.py.
+SALES_ANGLES_ENABLED = os.getenv("SALES_ANGLES_ENABLED", "true").strip().lower() == "true"
+SALES_ANGLE_WEIGHT = float(os.getenv("SALES_ANGLE_WEIGHT", "0.5"))  # 0 = pure virality, 1 = pure sales angle
+# If no candidate in a video clears this sales_angle_score, ranking falls back
+# to virality-only for that video (with a console notice) instead of blending
+# in a near-zero sales angle score for every clip.
+SALES_ANGLE_MIN_SCORE = float(os.getenv("SALES_ANGLE_MIN_SCORE", "30"))
 
 # VAD (Voice Activity Detection) settings for faster-whisper
 # Default threshold is 0.5; lower = more sensitive, higher = less sensitive

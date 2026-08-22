@@ -21,12 +21,47 @@ def _run_local(
     download_format: str,
     language: Optional[str],
 ) -> Dict:
-    from .local.clipper import crop_highlights_local
     from .local.downloader import download_youtube_local
-    from .local.llm import call_local_llm
-    from .local.transcriber import transcribe_local
+    from .local.drive import (
+        download_drive_file,
+        download_drive_folder,
+        is_drive_folder_url,
+        is_drive_url,
+    )
 
-    source_path = download_youtube_local(youtube_url, fmt=download_format)
+    if is_drive_folder_url(youtube_url):
+        video_paths = download_drive_folder(youtube_url)
+        results = []
+        for path in video_paths:
+            print(f"[pipeline/local] === processing {path} ===", flush=True)
+            try:
+                results.append(_process_single_local(path, num_clips, aspect_ratio, language))
+            except Exception as e:
+                print(f"[pipeline/local] failed for {path}: {e}", flush=True)
+                results.append({"mode": "local", "source_video_url": path, "error": str(e)})
+        return {"mode": "local", "batch": True, "source": youtube_url, "results": results}
+
+    if is_drive_url(youtube_url):
+        source_path = download_drive_file(youtube_url)
+    else:
+        source_path = download_youtube_local(youtube_url, fmt=download_format)
+
+    return _process_single_local(source_path, num_clips, aspect_ratio, language)
+
+
+def _process_single_local(
+    source_path: str,
+    num_clips: int,
+    aspect_ratio: str,
+    language: Optional[str],
+) -> Dict:
+    import os
+
+    from .local.clipper import crop_highlights_local
+    from .local.llm import call_local_llm
+    from .local.subtitles import burn_subtitles, words_for_window
+    from .local.transcriber import transcribe_local
+    from .config import LOCAL_SUBTITLES_ENABLED
 
     transcript = transcribe_local(source_path, language=language)
     if not transcript["segments"]:
@@ -39,10 +74,28 @@ def _run_local(
     if not all_highlights:
         raise RuntimeError("Highlight generator returned zero clips.")
 
-    top = sorted(all_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
+    top = sorted(all_highlights, key=lambda h: float(h.get("combined_score", h.get("score", 0))), reverse=True)[:num_clips]
     print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates", flush=True)
 
     shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio)
+
+    if LOCAL_SUBTITLES_ENABLED:
+        for short in shorts:
+            clip_path = short.get("clip_url")
+            if not clip_path or not os.path.exists(clip_path):
+                continue
+            words = words_for_window(
+                transcript["segments"], float(short["start_time"]), float(short["end_time"])
+            )
+            print(f"[subtitles/local] burning {len(words)} words onto {clip_path}", flush=True)
+            tmp_path = clip_path + ".subbed.mp4"
+            try:
+                burn_subtitles(clip_path, words, tmp_path)
+                os.replace(tmp_path, clip_path)
+            except Exception as e:
+                print(f"[subtitles/local] failed for {clip_path}: {e}", flush=True)
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     return {
         "mode": "local",
@@ -73,7 +126,7 @@ def _run_api(
     if not all_highlights:
         raise RuntimeError("Highlight generator returned zero clips.")
 
-    top = sorted(all_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
+    top = sorted(all_highlights, key=lambda h: float(h.get("combined_score", h.get("score", 0))), reverse=True)[:num_clips]
     print(f"[pipeline] cropping {len(top)} of {len(all_highlights)} candidates", flush=True)
 
     shorts = crop_highlights(source_url, top, aspect_ratio=aspect_ratio)

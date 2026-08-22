@@ -5,6 +5,14 @@ yt-dlp>=2024.1.1
 faster-whisper>=1.0.0
 openai>=1.0.0
 google-genai>=1.0.0
-opencv-python>=4.8.0
+# opencv-contrib-python (not opencv-python) — mediapipe depends on the
+# contrib build, and having both installed together corrupts the shared
+# cv2 package directory.
+opencv-contrib-python>=4.8.0
+gdown>=5.2.0
+# Pinned: mediapipe>=1.0's new Tasks API face-landmarker graph crashes on
+# some macOS setups (Metal graph-service init failure). 0.10.14 still ships
+# the legacy solutions.face_mesh API used for active-speaker detection.
+mediapipe==0.10.14
 # torch is only needed if you want CUDA Whisper. CPU works without it.
 # torch>=2.0
