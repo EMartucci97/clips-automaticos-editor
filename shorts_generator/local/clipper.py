@@ -9,7 +9,7 @@ Two stages per highlight:
 import os
 import re
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from ..config import LOCAL_OUTPUT_DIR
 
@@ -63,33 +63,10 @@ def _active_speaker_centers(in_path: str, shot_overrides: Optional[Dict[int, int
         return None
 
 
-def _reframe_vertical(
-    in_path: str,
-    out_path: str,
-    aspect_ratio: str,
-    shot_overrides: Optional[Dict[int, int]] = None,
-) -> str:
-    """Crop the cut clip to the target aspect ratio, tracking whichever face
-    is actively speaking (mouth motion correlated with audio) when possible,
-    falling back to naive largest-face tracking otherwise."""
-    try:
-        import cv2  # type: ignore
-    except ImportError as e:
-        raise RuntimeError(
-            "opencv-python is required for --mode local. Install it with:\n"
-            "    pip install -r requirements-local.txt"
-        ) from e
-
+def _fit_crop_size(src_w: int, src_h: int, aspect_ratio: str) -> Tuple[int, int]:
+    """Largest crop that fits inside a src_w x src_h frame at aspect_ratio,
+    rounded down to even pixel dimensions (ffmpeg/H.264 requirement)."""
     target_ratio = _ratio(aspect_ratio)
-    cap = cv2.VideoCapture(in_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open {in_path}")
-
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-    # Compute the largest crop that fits inside the frame at the target ratio.
     if target_ratio < src_w / src_h:
         crop_h = src_h
         crop_w = int(crop_h * target_ratio)
@@ -98,19 +75,46 @@ def _reframe_vertical(
         crop_h = int(crop_w / target_ratio)
     crop_w = max(2, crop_w - (crop_w % 2))
     crop_h = max(2, crop_h - (crop_h % 2))
+    return crop_w, crop_h
+
+
+def _track_and_crop(
+    in_path: str,
+    out_w: int,
+    out_h: int,
+    shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
+) -> str:
+    """Per-frame face/active-speaker-tracked crop+resize of `in_path` down to
+    exactly `out_w`x`out_h`, tracking whichever face is actively speaking
+    (mouth motion correlated with audio) when possible, falling back to
+    naive largest-face tracking otherwise.
+
+    Returns the path to a silent (no audio) mp4 written next to `in_path`
+    (`<in_path>.track.silent.mp4`) — caller is responsible for muxing audio
+    back in and cleaning up the temp file."""
+    try:
+        import cv2  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "opencv-python is required for --mode local. Install it with:\n"
+            "    pip install -r requirements-local.txt"
+        ) from e
+
+    cap = cv2.VideoCapture(in_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open {in_path}")
+
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    target_ratio = out_w / out_h
 
     speaker_centers = _active_speaker_centers(in_path, shot_overrides=shot_overrides)
     face_cascade = None
     if speaker_centers is None:
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-    # Output resolution is fixed for the whole clip (largest crop that fits
-    # the source at the target ratio). The per-frame crop *window* can be
-    # smaller/positioned anywhere within the frame — e.g. to isolate one
-    # pane of a multi-camera grid layout — and gets resized up to this.
-    out_w, out_h = crop_w, crop_h
-
-    silent_path = out_path + ".silent.mp4"
+    silent_path = in_path + ".track.silent.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(silent_path, fourcc, fps, (out_w, out_h))
 
@@ -182,20 +186,56 @@ def _reframe_vertical(
 
     cap.release()
     writer.release()
+    return silent_path
 
-    # Mux audio from the cut clip back onto the silent reframed video.
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-i", silent_path,
-        "-i", in_path,
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "128k",
-        "-map", "0:v:0", "-map", "1:a:0?",
-        "-shortest",
-        out_path,
-    ]
-    subprocess.run(cmd, check=True)
-    os.remove(silent_path)
+
+def _reframe_vertical(
+    in_path: str,
+    out_path: str,
+    aspect_ratio: str,
+    shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
+) -> str:
+    """Crop the cut clip to the target aspect ratio, tracking whichever face
+    is actively speaking (mouth motion correlated with audio) when possible,
+    falling back to naive largest-face tracking otherwise."""
+    try:
+        import cv2  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "opencv-python is required for --mode local. Install it with:\n"
+            "    pip install -r requirements-local.txt"
+        ) from e
+
+    cap = cv2.VideoCapture(in_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open {in_path}")
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
+    # Output resolution is fixed for the whole clip (largest crop that fits
+    # the source at the target ratio). The per-frame crop *window* can be
+    # smaller/positioned anywhere within the frame — e.g. to isolate one
+    # pane of a multi-camera grid layout — and gets resized up to this.
+    out_w, out_h = _fit_crop_size(src_w, src_h, aspect_ratio)
+
+    silent_path = _track_and_crop(in_path, out_w, out_h, shot_overrides=shot_overrides)
+    try:
+        # Mux audio from the cut clip back onto the silent reframed video.
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", silent_path,
+            "-i", in_path,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-map", "0:v:0", "-map", "1:a:0?",
+            "-shortest",
+            out_path,
+        ]
+        subprocess.run(cmd, check=True)
+    finally:
+        if os.path.exists(silent_path):
+            os.remove(silent_path)
     return out_path
 
 
@@ -205,7 +245,7 @@ def crop_clip_local(
     end_time: float,
     aspect_ratio: str,
     out_path: str,
-    shot_overrides: Optional[Dict[int, int]] = None,
+    shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
 ) -> str:
     """Cut + reframe one highlight, returning the local mp4 path.
 
@@ -220,6 +260,162 @@ def crop_clip_local(
     finally:
         if os.path.exists(cut_path):
             os.remove(cut_path)
+    return out_path
+
+
+def _ffprobe_duration(path: str) -> float:
+    """Duration in seconds of a media file, via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return float(result.stdout.strip())
+
+
+def _build_external_pane(
+    source: str,
+    start: float,
+    end: float,
+    needed_duration: float,
+    out_w: int,
+    pane_h: int,
+    fps: float,
+    tmp_prefix: str,
+) -> str:
+    """Cut `source[start:end]`, loop (if shorter) or trim (if longer) it to
+    exactly `needed_duration` seconds, and simple-center-crop/scale it (no
+    face tracking) to `out_w`x`pane_h` at `fps`. Returns the path to the
+    resulting silent (no audio) mp4."""
+    cut_path = tmp_prefix + ".cut.mp4"
+    pane_path = tmp_prefix + ".pane.mp4"
+    try:
+        _cut_subclip(source, start, end, cut_path)
+        src_duration = _ffprobe_duration(cut_path)
+        vf = (
+            f"fps={fps},"
+            f"scale=w={out_w}:h={pane_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{pane_h}"
+        )
+        cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+        if src_duration < needed_duration:
+            # Source is shorter than the pane needs — loop it indefinitely,
+            # then -t below trims the loop to the exact needed duration.
+            cmd += ["-stream_loop", "-1"]
+        cmd += [
+            "-i", cut_path,
+            "-t", f"{needed_duration:.3f}",
+            "-vf", vf,
+            "-an",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            pane_path,
+        ]
+        subprocess.run(cmd, check=True)
+    finally:
+        if os.path.exists(cut_path):
+            os.remove(cut_path)
+    return pane_path
+
+
+def crop_clip_split(
+    main_source: str,
+    main_start: float,
+    main_end: float,
+    aspect_ratio: str,
+    out_path: str,
+    top: Optional[Dict] = None,
+    bottom: Optional[Dict] = None,
+    shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
+) -> str:
+    """Stack two half-height panes into one `aspect_ratio` canvas.
+
+    `top`/`bottom`, when provided, are dicts {"source": path, "start": float,
+    "end": float} describing an external clip/segment to use for that pane
+    instead of the main clip. When None, that pane uses the normal
+    face/active-speaker-tracked crop of `main_source` between
+    `main_start`/`main_end`.
+
+    Only `main_source`'s audio (main_start-main_end) ends up in the output;
+    any external pane video is silent/muted in the composite.
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "opencv-python is required for --mode local. Install it with:\n"
+            "    pip install -r requirements-local.txt"
+        ) from e
+
+    needed_duration = main_end - main_start
+    main_cut_path = out_path + ".main.cut.mp4"
+    combined_silent_path = out_path + ".combined.silent.mp4"
+    temp_files = [main_cut_path, combined_silent_path]
+
+    try:
+        _cut_subclip(main_source, main_start, main_end, main_cut_path)
+
+        cap = cv2.VideoCapture(main_cut_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"could not open {main_cut_path}")
+        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+
+        out_w, out_h = _fit_crop_size(src_w, src_h, aspect_ratio)
+        pane_h = out_h // 2
+        pane_h = max(2, pane_h - (pane_h % 2))
+
+        pane_paths = []
+        for slot_name, pane_spec in (("top", top), ("bottom", bottom)):
+            if pane_spec is None:
+                raw_silent = _track_and_crop(main_cut_path, out_w, pane_h, shot_overrides=shot_overrides)
+                pane_path = out_path + f".{slot_name}.pane.mp4"
+                os.replace(raw_silent, pane_path)
+            else:
+                pane_path = _build_external_pane(
+                    pane_spec["source"], float(pane_spec["start"]), float(pane_spec["end"]),
+                    needed_duration, out_w, pane_h, fps,
+                    out_path + f".{slot_name}.ext",
+                )
+            pane_paths.append(pane_path)
+            temp_files.append(pane_path)
+
+        top_path, bottom_path = pane_paths
+
+        # Stack the two silent panes into one silent out_w x (pane_h*2) video.
+        stack_cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", top_path,
+            "-i", bottom_path,
+            "-filter_complex", "[0:v][1:v]vstack=inputs=2[v]",
+            "-map", "[v]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            combined_silent_path,
+        ]
+        subprocess.run(stack_cmd, check=True)
+
+        # Mux the main clip's audio back onto the combined silent video.
+        mux_cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", combined_silent_path,
+            "-i", main_cut_path,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-map", "0:v:0", "-map", "1:a:0?",
+            "-shortest",
+            out_path,
+        ]
+        subprocess.run(mux_cmd, check=True)
+    finally:
+        for f in temp_files:
+            if os.path.exists(f):
+                os.remove(f)
+
     return out_path
 
 

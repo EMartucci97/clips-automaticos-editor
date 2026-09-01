@@ -20,7 +20,7 @@ accepts those overrides and uses them verbatim, skipping the heuristic
 entirely for overridden shots.
 """
 import subprocess
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 
@@ -290,7 +290,7 @@ def _analyze(video_path: str) -> _Analysis:
 
 def compute_active_speaker_centers(
     video_path: str,
-    shot_overrides: Optional[Dict[int, int]] = None,
+    shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
 ) -> List[Optional[SpeakerTarget]]:
     """One SpeakerTarget per frame of video_path — the face most likely
     talking at that moment, with a short-memory bias against flicker within
@@ -299,7 +299,11 @@ def compute_active_speaker_centers(
 
     `shot_overrides`: optional {shot_index: track_id} map (from
     `list_shots_for_review`) forcing which face is "the speaker" for
-    specific shots, bypassing the mouth-motion/audio heuristic there.
+    specific shots, bypassing the mouth-motion/audio heuristic there. A
+    single real face commonly fragments into several track ids within one
+    shot when detection drops out for a few frames (motion blur, head
+    turn) and resumes under a new id — pass a list of track ids for a shot
+    to treat them as the same speaker, tried in order per frame.
     """
     a = _analyze(video_path)
     n = a.n
@@ -319,11 +323,18 @@ def compute_active_speaker_centers(
         shot_idx = a.frame_to_shot[i]
         override_track = shot_overrides.get(shot_idx) if shot_overrides else None
         if override_track is not None:
-            c = a.centroid_by_track.get(override_track, [None] * n)[i]
+            override_ids = override_track if isinstance(override_track, (list, tuple)) else [override_track]
+            c = None
+            chosen = None
+            for t in override_ids:
+                cc = a.centroid_by_track.get(t, [None] * n)[i]
+                if cc is not None:
+                    c, chosen = cc, t
+                    break
             if c is not None:
-                current_speaker = override_track
+                current_speaker = chosen
                 cx, cy = c
-                fh = a.height_by_track[override_track][i] or 0.0
+                fh = a.height_by_track[chosen][i] or 0.0
                 centers[i] = SpeakerTarget(cx, cy, fh, a.cuts[i])
             else:
                 centers[i] = centers[i - 1] if i > 0 else None
@@ -339,11 +350,27 @@ def compute_active_speaker_centers(
         else:
             candidate = current_speaker if current_speaker in present else present[0]
 
-        # A cut resets track identity above, so current_speaker can't
-        # possibly be in `present` — switch immediately, no hold delay.
-        if a.cuts[i] or current_speaker not in present:
+        if a.cuts[i]:
+            # A cut resets track identity above, so current_speaker can't
+            # possibly be in `present` — switch immediately, no hold delay.
             current_speaker = candidate
             hold = 0
+        elif current_speaker not in present:
+            # Not a real cut — the tracked face just dropped out of
+            # detection for a bit (motion blur, head turn, a stray
+            # false-positive elsewhere) and will often resume under a new
+            # track id once it's back. Treat this the same as an ordinary
+            # candidate mismatch: hold the last known position and only
+            # commit to `candidate` once it's stayed put for the full
+            # debounce window, instead of snapping onto whatever face
+            # happens to be detected on this exact frame.
+            hold += 1
+            if hold >= switch_hold_frames:
+                current_speaker = candidate
+                hold = 0
+            else:
+                centers[i] = centers[i - 1] if i > 0 else None
+                continue
         elif candidate != current_speaker:
             hold += 1
             if hold >= switch_hold_frames:
