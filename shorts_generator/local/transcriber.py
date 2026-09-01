@@ -11,7 +11,13 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
-from ..config import LOCAL_OUTPUT_DIR, LOCAL_WHISPER_DEVICE, LOCAL_WHISPER_MODEL
+from ..config import (
+    LOCAL_OUTPUT_DIR,
+    LOCAL_WHISPER_DEVICE,
+    LOCAL_WHISPER_INITIAL_PROMPT,
+    LOCAL_WHISPER_LANGUAGE,
+    LOCAL_WHISPER_MODEL,
+)
 
 
 def _transcript_cache_path(media_path: str) -> Path:
@@ -108,6 +114,7 @@ def _resolve_device() -> str:
 def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
     """Run faster-whisper on a local file path, caching the result as .srt
     (+ a sidecar .words.json with word-level timestamps for subtitles)."""
+    language = language or LOCAL_WHISPER_LANGUAGE
     cache_path = _transcript_cache_path(media_path)
     words_path = _words_cache_path(media_path)
     if cache_path.exists():
@@ -159,6 +166,8 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
         "condition_on_previous_text": False,
         "word_timestamps": True,
     }
+    if LOCAL_WHISPER_INITIAL_PROMPT:
+        transcribe_kwargs["initial_prompt"] = LOCAL_WHISPER_INITIAL_PROMPT
     if LOCAL_WHISPER_VAD_FILTER:
         transcribe_kwargs["vad_filter"] = True
         transcribe_kwargs["vad_parameters"] = LOCAL_WHISPER_VAD_PARAMETERS

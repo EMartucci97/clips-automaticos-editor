@@ -16,10 +16,48 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
-LOCAL_WHISPER_MODEL = os.getenv("LOCAL_WHISPER_MODEL", "base")
+LOCAL_WHISPER_MODEL = os.getenv("LOCAL_WHISPER_MODEL", "medium")
 LOCAL_WHISPER_DEVICE = os.getenv("LOCAL_WHISPER_DEVICE", "auto")  # auto / cpu / cuda
+# Ruarte content is essentially always Spanish. Without this, faster-whisper
+# auto-detects language per run and on long/noisy audio it can mis-detect
+# (or drift into) English mid-transcript, producing garbled pseudo-English
+# text instead of the real Spanish — which then poisons every downstream LLM
+# call (content-type detection, virality scoring, sales-angle matching).
+# Empty string restores auto-detect.
+LOCAL_WHISPER_LANGUAGE = os.getenv("LOCAL_WHISPER_LANGUAGE", "es").strip() or None
+# Vocabulary hint passed to Whisper to bias recognition toward Ruarte's
+# financial/market jargon — a generic model otherwise mishears terms like
+# "CCL" or "MEP" as near-homophone junk. Empty string disables the hint.
+LOCAL_WHISPER_INITIAL_PROMPT = os.getenv(
+    "LOCAL_WHISPER_INITIAL_PROMPT",
+    "Dólar CCL, dólar MEP, dólar blue, brecha cambiaria, S&P 500, Nasdaq, "
+    "tasa de interés, inflación, Merval, bonos, acciones, cripto, Bitcoin, "
+    "cartera de inversión, Roberto Ruarte, Ruarte Reports.",
+).strip()
 LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR", "output")
 LOCAL_SUBTITLES_ENABLED = os.getenv("LOCAL_SUBTITLES_ENABLED", "true").strip().lower() == "true"
+
+# One extra LLM pass over the raw transcript, before highlight selection and
+# clipping, that catches likely Whisper mis-hearings (mainly acronyms losing
+# their first letter — "fore mexicana" instead of "AFORE mexicana"). See
+# shorts_generator/local/review.py. Cached per source file; disable if it's
+# adding latency you don't want.
+TRANSCRIPT_REVIEW_ENABLED = os.getenv("TRANSCRIPT_REVIEW_ENABLED", "true").strip().lower() == "true"
+
+# Speaker identification (--mode local only). Diarizes the audio with
+# pyannote-audio and labels each segment ROBERTO/OTHER by matching each
+# diarized speaker's voice embedding against a reference built from clean
+# solo-Roberto clips — so highlights.py can prioritize when Roberto speaks
+# (or responds to a guest) without needing a fixed turn order. Best-effort:
+# if pyannote isn't installed, HF_TOKEN is missing, or the reference clips
+# aren't present, the pipeline just runs without speaker labels.
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+LOCAL_DIARIZATION_ENABLED = os.getenv("LOCAL_DIARIZATION_ENABLED", "true").strip().lower() == "true"
+LOCAL_DIARIZATION_REF_DIR = os.getenv("LOCAL_DIARIZATION_REF_DIR", "fixtures/voice_ref")
+# Cosine similarity above this = that diarized speaker cluster is Roberto.
+# Measured 0.93 (Roberto) vs 0.37 (a real guest) on the validation fixture —
+# wide margin, so this threshold has plenty of headroom either way.
+LOCAL_DIARIZATION_SIMILARITY_THRESHOLD = float(os.getenv("LOCAL_DIARIZATION_SIMILARITY_THRESHOLD", "0.6"))
 
 # When enabled, the highlight LLM also scores each candidate against a set of
 # proven sales angles (in addition to generic virality) and the two scores

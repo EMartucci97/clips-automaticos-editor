@@ -16,3 +16,13 @@ gdown>=5.2.0
 mediapipe==0.10.14
 # torch is only needed if you want CUDA Whisper. CPU works without it.
 # torch>=2.0
+
+# Review/regen dashboard (dashboard.py). Streamlit's own requirement is
+# protobuf>=5.26.1, but mediapipe 0.10.14 needs protobuf<5 — pin protobuf
+# to the mediapipe-compatible range below; both work fine at that version
+# despite pip's dependency-conflict warning.
+streamlit>=1.60.0
+protobuf>=4.25.3,<5
+
+# Timeline editor (editor_server.py) — lightweight standalone web app.
+flask>=3.0.0
