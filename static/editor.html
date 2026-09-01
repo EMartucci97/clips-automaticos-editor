@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Editor de clips</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161a;
+    --panel: #1c1f26;
+    --border: #2b2f38;
+    --text: #e6e8eb;
+    --muted: #8a8f99;
+    --accent: #4f8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header .status { font-size: 12px; color: var(--muted); }
+
+  #player-wrap { padding: 16px 20px 0; }
+  video { width: 100%; max-height: 62vh; background: #000; border-radius: 6px; display: block; }
+
+  #timeline-wrap { padding: 14px 20px 20px; }
+
+  #timeline-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  #timeline-toolbar button {
+    width: 22px;
+    height: 22px;
+    background: #22262f;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+  }
+  #timeline-toolbar button:hover { background: #2b3038; }
+  #zoom-fit { width: auto; padding: 0 8px; font-size: 11px; }
+  #zoom-slider { width: 140px; }
+  #zoom-label { min-width: 42px; }
+  #zoom-hint { margin-left: auto; }
+
+  #timeline-ruler {
+    position: relative;
+    height: 18px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    overflow: hidden;
+  }
+  #ruler-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  #timeline-viewport {
+    position: relative;
+    height: 64px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 0 0 6px 6px;
+    overflow: hidden;
+  }
+  #waveform-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  #timeline-scroll {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+  #timeline {
+    position: relative;
+    height: 64px;
+    min-width: 100%;
+    cursor: pointer;
+    will-change: transform;
+  }
+  #playhead {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: #ff5470;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .marker {
+    position: absolute;
+    top: 8px; bottom: 8px;
+    background: color-mix(in srgb, var(--marker-color, var(--accent)) 55%, transparent);
+    border: 1px solid var(--marker-color, var(--accent));
+    border-radius: 4px;
+    min-width: 4px;
+  }
+  .marker:hover { background: color-mix(in srgb, var(--marker-color, var(--accent)) 80%, transparent); }
+  .marker.selected { outline: 2px solid #fff; outline-offset: 1px; }
+  .handle {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    z-index: 6;
+  }
+  .handle.left { left: -4px; }
+  .handle.right { right: -4px; }
+
+  #time-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  #detail {
+    margin: 0 20px 20px;
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    min-height: 90px;
+  }
+  #detail .empty { color: var(--muted); font-size: 13px; }
+  #detail .angle {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--marker-color, var(--accent)) 25%, transparent);
+    border: 1px solid var(--marker-color, var(--accent));
+    margin-bottom: 8px;
+  }
+  #detail h2 { font-size: 15px; margin: 0 0 6px; }
+  #detail p { font-size: 13px; color: var(--muted); margin: 0 0 6px; line-height: 1.4; }
+  #detail .times { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+
+  .detail-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .detail-section h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    margin: 0 0 6px;
+    font-weight: 600;
+  }
+  #segment-transcript {
+    width: 100%;
+    resize: vertical;
+    min-height: 64px;
+    background: #14161a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+    font-family: inherit;
+  }
+  #segment-transcript:disabled { color: var(--muted); }
+  #segment-transcript-hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  #segment-analysis { font-size: 13px; }
+  #segment-analysis .muted { color: var(--muted); }
+  #segment-analysis .analysis-theme { margin-bottom: 6px; }
+  #segment-analysis ul { margin: 4px 0 0; padding-left: 18px; }
+  #segment-analysis li { margin-bottom: 2px; }
+
+  #functions {
+    display: flex;
+    gap: 8px;
+  }
+  #functions button {
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: #22262f;
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Editor de clips</h1>
+  <span class="status" id="status">cargando highlights…</span>
+</header>
+
+<div id="player-wrap">
+  <video id="player" src="/video" controls preload="metadata"></video>
+</div>
+
+<div id="timeline-wrap">
+  <div id="timeline-toolbar">
+    <button id="zoom-out" title="Alejar">−</button>
+    <input type="range" id="zoom-slider" min="0" max="100" value="0" step="1">
+    <button id="zoom-in" title="Acercar">+</button>
+    <span id="zoom-label">1.0x</span>
+    <button id="zoom-fit" title="Ver todo el video">Ver todo</button>
+    <span id="zoom-hint">Ctrl/Cmd + scroll sobre el timeline para hacer zoom</span>
+  </div>
+  <div id="timeline-ruler">
+    <canvas id="ruler-canvas"></canvas>
+  </div>
+  <div id="timeline-viewport">
+    <canvas id="waveform-canvas"></canvas>
+    <div id="timeline-scroll">
+      <div id="timeline">
+        <div id="playhead" style="left:0%"></div>
+      </div>
+    </div>
+  </div>
+  <div id="time-labels">
+    <span id="label-start">00:00:00</span>
+    <span id="label-end">--:--:--</span>
+  </div>
+</div>
+
+<div id="detail">
+  <div class="empty">Elegí un marcador del timeline para ver el detalle.</div>
+</div>
+
+<script>
+const video = document.getElementById('player');
+const timeline = document.getElementById('timeline');
+const playhead = document.getElementById('playhead');
+const waveformCanvas = document.getElementById('waveform-canvas');
+const rulerCanvas = document.getElementById('ruler-canvas');
+const timelineViewport = document.getElementById('timeline-viewport');
+const timelineScroll = document.getElementById('timeline-scroll');
+const zoomSlider = document.getElementById('zoom-slider');
+const zoomLabel = document.getElementById('zoom-label');
+const zoomInBtn = document.getElementById('zoom-in');
+const zoomOutBtn = document.getElementById('zoom-out');
+const zoomFitBtn = document.getElementById('zoom-fit');
+const statusEl = document.getElementById('status');
+const detailEl = document.getElementById('detail');
+const labelStart = document.getElementById('label-start');
+const labelEnd = document.getElementById('label-end');
+
+let highlights = [];
+let duration = 0;
+let selectedId = null;
+
+// Single source of truth for horizontal timeline position. #timeline-scroll
+// no longer uses native overflow-x scrolling: the browser's compositor can
+// advance a natively-scrolled element (and anything driven by scroll events)
+// ahead of a canvas repaint during fast/momentum scrolling, since the two are
+// painted through different pipelines. Driving both the marker layer
+// (via transform) and the waveform/ruler canvases from this one variable,
+// updated synchronously in setScrollLeft(), makes a visual mismatch between
+// them impossible rather than merely unlikely.
+let viewScrollLeft = 0;
+
+function maxScrollLeft() {
+  const w = parseFloat(timeline.style.width) || 0;
+  return Math.max(0, w - timelineViewport.clientWidth);
+}
+
+function setScrollLeft(x) {
+  viewScrollLeft = Math.min(maxScrollLeft(), Math.max(0, x));
+  timeline.style.transform = `translateX(${-viewScrollLeft}px)`;
+  drawWaveform();
+  drawRuler();
+}
+
+const COLORS = ['#4f8cff', '#ff9f43', '#2ecc71', '#e84393', '#00cec9', '#fdcb6e', '#a29bfe', '#ff7675'];
+
+function fmt(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+  const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+  const s = String(sec % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+function pct(t) {
+  if (!duration) return 0;
+  return Math.min(100, Math.max(0, (t / duration) * 100));
+}
+
+function colorFor(h) {
+  return COLORS[h.id % COLORS.length];
+}
+
+function renderMarkers() {
+  timeline.querySelectorAll('.marker').forEach(el => el.remove());
+  highlights.forEach(h => {
+    const el = document.createElement('div');
+    el.className = 'marker' + (h.id === selectedId ? ' selected' : '');
+    el.style.setProperty('--marker-color', colorFor(h));
+    el.style.left = pct(h.start_time) + '%';
+    el.style.width = Math.max(0.2, pct(h.end_time) - pct(h.start_time)) + '%';
+    el.title = (h.sales_angle || 'sin ángulo') + ' — ' + (h.title || '');
+    el.dataset.id = h.id;
+
+    const left = document.createElement('div');
+    left.className = 'handle left';
+    left.addEventListener('mousedown', e => startDrag(e, h, 'start_time'));
+
+    const right = document.createElement('div');
+    right.className = 'handle right';
+    right.addEventListener('mousedown', e => startDrag(e, h, 'end_time'));
+
+    el.addEventListener('click', e => {
+      if (e.target === left || e.target === right) return;
+      selectHighlight(h.id);
+      video.currentTime = h.start_time;
+      video.play();
+    });
+
+    el.appendChild(left);
+    el.appendChild(right);
+    timeline.appendChild(el);
+  });
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s == null ? '' : s;
+  return div.innerHTML;
+}
+
+function selectHighlight(id) {
+  selectedId = id;
+  renderMarkers();
+  const h = highlights.find(x => x.id === id);
+  if (!h) return;
+  detailEl.innerHTML = `
+    <span class="angle" style="--marker-color:${colorFor(h)}">${h.sales_angle || 'sin ángulo'}</span>
+    <h2>${h.title || '(sin título)'}</h2>
+    <div class="times">${fmt(h.start_time)} → ${fmt(h.end_time)} · virality ${h.score ?? '-'} · sales_angle_score ${h.sales_angle_score ?? '-'}</div>
+    <p>${h.central_theme || ''}</p>
+    <p><em>${h.hook_sentence || ''}</em></p>
+    <div class="detail-section">
+      <h3>Transcripción del tramo</h3>
+      <textarea id="segment-transcript" disabled></textarea>
+      <div id="segment-transcript-hint">Editá acá si Whisper transcribió mal algo — se guarda solo y recalcula el tema.</div>
+    </div>
+    <div class="detail-section">
+      <h3>Tema central y subtemas</h3>
+      <div id="segment-analysis"><span class="muted">Cargando…</span></div>
+    </div>
+    <div id="functions">
+      <button disabled title="Próximamente">Sacar silencios</button>
+      <button disabled title="Próximamente">Formato</button>
+    </div>
+  `;
+
+  const transcriptEl = document.getElementById('segment-transcript');
+  transcriptEl.addEventListener('blur', () => onSegmentTranscriptEdited(h.id));
+
+  loadSegmentDetail(h);
+}
+
+// Bumped on every load so a stale fetch (e.g. from a highlight the user
+// already clicked away from) can't overwrite what's currently shown.
+let detailRequestId = 0;
+
+async function loadSegmentDetail(h) {
+  const reqId = ++detailRequestId;
+  const transcriptEl = document.getElementById('segment-transcript');
+  const analysisEl = document.getElementById('segment-analysis');
+  if (!transcriptEl || !analysisEl) return;
+
+  transcriptEl.value = 'Cargando transcripción…';
+  transcriptEl.disabled = true;
+  analysisEl.innerHTML = '<span class="muted">Cargando…</span>';
+
+  let text = '';
+  try {
+    const res = await fetch(`/api/transcript_range?start=${h.start_time}&end=${h.end_time}`);
+    const data = await res.json();
+    text = data.text || '';
+  } catch (err) {
+    console.error('[editor] failed to load transcript range', err);
+  }
+  if (reqId !== detailRequestId || selectedId !== h.id) return;
+
+  transcriptEl.value = text;
+  transcriptEl.disabled = false;
+  h._transcriptText = text;
+
+  analyzeSegment(h, text, reqId);
+}
+
+async function analyzeSegment(h, text, reqId) {
+  const analysisEl = document.getElementById('segment-analysis');
+  if (!analysisEl) return;
+
+  if (!text.trim()) {
+    analysisEl.innerHTML = '<span class="muted">Sin texto para analizar en este tramo.</span>';
+    return;
+  }
+
+  analysisEl.innerHTML = '<span class="muted">Analizando tema y subtemas…</span>';
+  try {
+    const res = await fetch('/api/analyze_segment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (reqId !== undefined && (reqId !== detailRequestId || selectedId !== h.id)) return;
+
+    const subtopics = data.subtopics || [];
+    const subtopicsHtml = subtopics.length
+      ? `<div class="analysis-subtopics"><strong>Subtemas:</strong><ul>${subtopics.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul></div>`
+      : '';
+    analysisEl.innerHTML = `
+      <div class="analysis-theme"><strong>Tema central:</strong> ${escapeHtml(data.central_theme) || '(sin detectar)'}</div>
+      ${subtopicsHtml}
+    `;
+  } catch (err) {
+    console.error('[editor] failed to analyze segment', err);
+    analysisEl.innerHTML = '<span class="muted">Error analizando el tramo.</span>';
+  }
+}
+
+function onSegmentTranscriptEdited(highlightId) {
+  const h = highlights.find(x => x.id === highlightId);
+  const transcriptEl = document.getElementById('segment-transcript');
+  if (!h || !transcriptEl || selectedId !== highlightId) return;
+
+  const newText = transcriptEl.value;
+  if (newText === h._transcriptText) return;
+  h._transcriptText = newText;
+
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transcript_override: newText }),
+  }).catch(err => console.error('[editor] failed to save transcript edit', err));
+
+  const reqId = ++detailRequestId;
+  analyzeSegment(h, newText, reqId);
+}
+
+function timeFromEvent(e) {
+  const rect = timeline.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  return frac * duration;
+}
+
+timeline.addEventListener('click', e => {
+  if (e.target.classList.contains('handle')) return;
+  if (e.target.classList.contains('marker')) return;
+  video.currentTime = timeFromEvent(e);
+});
+
+function currentPxPerSec() {
+  const w = parseFloat(timeline.style.width) || timelineViewport.clientWidth;
+  return duration ? w / duration : 0;
+}
+
+video.addEventListener('timeupdate', () => {
+  playhead.style.left = pct(video.currentTime) + '%';
+  if (zoomLevel > 1 && duration) {
+    const pxPerSec = currentPxPerSec();
+    const playheadX = video.currentTime * pxPerSec;
+    const viewLeft = viewScrollLeft;
+    const viewRight = viewLeft + timelineViewport.clientWidth;
+    if (playheadX < viewLeft || playheadX > viewRight) {
+      setScrollLeft(playheadX - timelineViewport.clientWidth / 2);
+    }
+  }
+});
+
+video.addEventListener('loadedmetadata', () => {
+  duration = video.duration;
+  labelEnd.textContent = fmt(duration);
+  layoutTimeline();
+  renderMarkers();
+});
+
+const ZOOM_MAX = 200;
+let zoomLevel = 1;
+
+function zoomFromSlider(v) { return Math.pow(ZOOM_MAX, v / 100); }
+function sliderFromZoom(z) { return 100 * Math.log(Math.max(1, z)) / Math.log(ZOOM_MAX); }
+
+const RULER_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+
+function niceRulerInterval(pxPerSec) {
+  for (const s of RULER_STEPS) {
+    if (s * pxPerSec >= 70) return s;
+  }
+  return RULER_STEPS[RULER_STEPS.length - 1];
+}
+
+function fmtRuler(sec, interval) {
+  sec = Math.max(0, Math.round(sec * 1000) / 1000);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.round((sec - Math.floor(sec)) * 1000);
+  if (interval < 1) {
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  }
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function drawRuler() {
+  const width = rulerCanvas.parentElement.clientWidth;
+  const height = rulerCanvas.parentElement.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  rulerCanvas.width = width * dpr;
+  rulerCanvas.height = height * dpr;
+  const ctx = rulerCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  if (!duration) return;
+  const pxPerSec = currentPxPerSec();
+  if (!pxPerSec) return;
+
+  const interval = niceRulerInterval(pxPerSec);
+  const scrollLeft = viewScrollLeft;
+  const timeLeft = scrollLeft / pxPerSec;
+  const timeRight = (scrollLeft + width) / pxPerSec;
+  const firstTick = Math.max(0, Math.floor(timeLeft / interval)) * interval;
+
+  ctx.strokeStyle = 'rgba(230, 232, 235, 0.35)';
+  ctx.fillStyle = 'rgba(230, 232, 235, 0.75)';
+  ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textBaseline = 'top';
+
+  for (let t = firstTick; t <= timeRight + interval; t += interval) {
+    const x = t * pxPerSec - scrollLeft;
+    ctx.beginPath();
+    ctx.moveTo(x, height - 6);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+    ctx.fillText(fmtRuler(t, interval), x + 3, 1);
+  }
+}
+
+function layoutTimeline() {
+  if (!duration) return;
+  const viewportWidth = timelineViewport.clientWidth;
+  const px = (viewportWidth / duration) * zoomLevel;
+  timeline.style.width = Math.max(viewportWidth, px * duration) + 'px';
+  setScrollLeft(viewScrollLeft);
+}
+
+function setZoom(z, anchorClientX) {
+  if (!duration) { zoomLevel = Math.min(ZOOM_MAX, Math.max(1, z)); return; }
+  const oldPxPerSec = currentPxPerSec();
+  let anchorTime = null;
+  if (anchorClientX != null) {
+    const rect = timelineScroll.getBoundingClientRect();
+    anchorTime = (anchorClientX - rect.left + viewScrollLeft) / oldPxPerSec;
+  }
+  zoomLevel = Math.min(ZOOM_MAX, Math.max(1, z));
+  zoomSlider.value = sliderFromZoom(zoomLevel);
+  zoomLabel.textContent = zoomLevel.toFixed(1) + 'x';
+  layoutTimeline();
+  if (anchorTime != null) {
+    const newPxPerSec = currentPxPerSec();
+    const rect = timelineScroll.getBoundingClientRect();
+    setScrollLeft(anchorTime * newPxPerSec - (anchorClientX - rect.left));
+  }
+}
+
+zoomSlider.addEventListener('input', () => setZoom(zoomFromSlider(Number(zoomSlider.value))));
+zoomInBtn.addEventListener('click', () => setZoom(zoomLevel * 1.5));
+zoomOutBtn.addEventListener('click', () => setZoom(zoomLevel / 1.5));
+zoomFitBtn.addEventListener('click', () => setZoom(1));
+
+timelineScroll.addEventListener('wheel', e => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  setZoom(zoomLevel * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX);
+}, { passive: false });
+
+// Horizontal panning (two-finger trackpad swipe, or shift+wheel). Handled
+// manually instead of native overflow-x scrolling — see setScrollLeft().
+timelineScroll.addEventListener('wheel', e => {
+  if (e.ctrlKey || e.metaKey) return; // that's the zoom handler above
+  const dx = e.deltaX !== 0 ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+  if (dx === 0) return;
+  e.preventDefault();
+  setScrollLeft(viewScrollLeft + dx);
+}, { passive: false });
+window.addEventListener('resize', () => layoutTimeline());
+
+let dragging = null; // { highlight, field }
+
+function startDrag(e, h, field) {
+  e.preventDefault();
+  e.stopPropagation();
+  dragging = { h, field };
+  selectHighlight(h.id);
+  window.addEventListener('mousemove', onDrag);
+  window.addEventListener('mouseup', endDrag);
+}
+
+function onDrag(e) {
+  if (!dragging) return;
+  const t = timeFromEvent(e);
+  const { h, field } = dragging;
+  if (field === 'start_time') {
+    h.start_time = Math.min(t, h.end_time - 0.5);
+  } else {
+    h.end_time = Math.max(t, h.start_time + 0.5);
+  }
+  renderMarkers();
+  selectHighlight(h.id);
+}
+
+function endDrag() {
+  if (!dragging) return;
+  const { h } = dragging;
+  dragging = null;
+  window.removeEventListener('mousemove', onDrag);
+  window.removeEventListener('mouseup', endDrag);
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ start_time: h.start_time, end_time: h.end_time }),
+  }).catch(err => console.error('[editor] failed to save marker', err));
+  if (selectedId === h.id) loadSegmentDetail(h);
+}
+
+let waveformPeaks = [];
+
+function drawWaveform() {
+  const width = timelineViewport.clientWidth;
+  const height = timelineViewport.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  waveformCanvas.width = width * dpr;
+  waveformCanvas.height = height * dpr;
+  const ctx = waveformCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  if (!waveformPeaks.length || !duration) return;
+
+  const pxPerSec = currentPxPerSec();
+  if (!pxPerSec) return;
+  const n = waveformPeaks.length;
+  const pointDuration = duration / n;
+  const scrollLeft = viewScrollLeft;
+  const timeLeft = scrollLeft / pxPerSec;
+  const timeRight = (scrollLeft + width) / pxPerSec;
+  const idxStart = Math.max(0, Math.floor(timeLeft / pointDuration) - 1);
+  const idxEnd = Math.min(n, Math.ceil(timeRight / pointDuration) + 1);
+
+  ctx.fillStyle = 'rgba(230, 232, 235, 0.28)';
+  const midY = height / 2;
+  const barWidth = Math.max(1, pointDuration * pxPerSec);
+  for (let i = idxStart; i < idxEnd; i++) {
+    const x = i * pointDuration * pxPerSec - scrollLeft;
+    const h = Math.max(1, waveformPeaks[i] * height * 0.9);
+    ctx.fillRect(x, midY - h / 2, Math.max(1, barWidth - 0.5), h);
+  }
+}
+
+async function loadWaveform() {
+  try {
+    const res = await fetch('/api/waveform');
+    waveformPeaks = await res.json();
+    drawWaveform();
+  } catch (err) {
+    console.error('[editor] failed to load waveform', err);
+  }
+}
+
+async function loadHighlights() {
+  statusEl.textContent = 'analizando video (puede tardar la primera vez)…';
+  try {
+    const res = await fetch('/api/highlights');
+    highlights = await res.json();
+    statusEl.textContent = `${highlights.length} zona(s) detectada(s)`;
+    renderMarkers();
+  } catch (err) {
+    statusEl.textContent = 'error cargando highlights';
+    console.error(err);
+  }
+}
+
+loadHighlights();
+loadWaveform();
+</script>
+
+</body>
+</html>
