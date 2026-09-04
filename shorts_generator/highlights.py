@@ -15,7 +15,7 @@ import re
 from typing import Callable, Dict, List, Optional
 
 from . import muapi
-from .config import SALES_ANGLE_MIN_SCORE, SALES_ANGLE_WEIGHT, SALES_ANGLES_ENABLED
+from .config import SALES_ANGLE_WEIGHT, SALES_ANGLES_ENABLED
 
 
 LLMFn = Callable[[str], str]
@@ -40,6 +40,14 @@ Virality signals to prioritize (ranked by impact):
 """
 
 
+SPEAKER_PRIORITY_CRITERIA = """
+Speaker labels: transcript lines are tagged [ROBERTO] or [OTHER] where speaker identification was possible (untagged lines mean it wasn't). Use this to prioritize, never to exclude:
+- A clip where ROBERTO speaks or responds is a plus.
+- A clip where [OTHER] asks a question or raises an angle and [ROBERTO] then answers/responds is a STRONG pattern — often better than Roberto alone, because the question sets up the hook. Treat it as a valid, high-value highlight, not something to avoid just because another speaker appears in it.
+- Do not discard or downrank a clip merely for including [OTHER]'s speech — only the presence/response of ROBERTO matters for this criterion.
+"""
+
+
 SALES_ANGLES = """
 Proven sales angles (Ruarte Reports — technical analysis / wealth management education, target avatar: investors with $100k-$3M already invested, 40-65yo, who do NOT identify as traders and want criteria/structure/timing/capital protection, not lifestyle promises):
 1. ECONOMIC CYCLE AWARENESS — why recognizing the cycle matters (getting stuck in a bad investment for years/decades, e.g. buying a top and never recovering)
@@ -59,6 +67,7 @@ HIGHLIGHT_SYSTEM_PROMPT = """You are an elite short-form video editor who has st
 
 {virality_criteria}
 {sales_angle_criteria}
+{speaker_priority_criteria}
 
 Content type: {content_type} | Density: {density}
 
@@ -67,23 +76,28 @@ Your task: identify the most viral-worthy highlights from the transcript.
 Rules:
 - Every highlight must open with a strong HOOK — a line that grabs attention within the first 3 seconds
 - start_time and end_time must bound the ENTIRE clip, from the hook line all the way through the full thought/story — NOT just the timestamp of the hook sentence itself. A highlight that is only the hook line's own 2-4 second span is WRONG.
-- Duration sweet spot: 45-90 seconds, measured as end_time minus start_time. Go shorter (20-44s) only for a perfect standalone one-liner. Go longer (91-180s) only when a story arc needs full context to land. Never return end_time - start_time under 20 seconds.
-- Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
+- Target duration: 45-80 seconds — this is the standard because clips over 80s (1:20) cannot run as paid ads. Never shorter than 45s. Prefer landing inside 80s.
+- Never cut mid-sentence or mid-thought — the full idea must be explained. If the complete thought genuinely cannot fit in 80s, it is OK to go longer (up to {max_duration}s) rather than cutting it short or dropping it — a human will trim it manually afterward. Do not force an unnatural cut just to hit 80s.
 - Clips must not overlap significantly with each other
 - Score 0-100 on viral potential (not general quality) — call this "score"
 - {sales_angle_instruction}
 - {num_clips_instruction}
 - For each highlight, identify the single best "hook_sentence" — the opening line that would make someone stop scrolling
 - Explain in one sentence why this clip is viral ("virality_reason")
+- Write "central_theme" (2-3 sentences, in Spanish): what this clip is actually about, based strictly on what is said in the transcript for that time window — not a generic label, a real summary of the argument/point being made
+
+The "highlights" array in the schema below shows 2 example objects, but that is only to illustrate the shape — it is NOT the target count. Your actual response must repeat that same object shape for MANY highlights, one object per highlight, until you satisfy {num_clips_instruction}.
 
 Respond ONLY with valid JSON (no markdown, no explanation):
-{{"highlights":[{{"title":"string","start_time":float,"end_time":float,"score":int,"hook_sentence":"string","virality_reason":"string"{sales_angle_json_fields}}}]}}"""
+{{"highlights":[{{"title":"string","start_time":float,"end_time":float,"score":int,"hook_sentence":"string","virality_reason":"string","central_theme":"string"{sales_angle_json_fields}}},{{"title":"string","start_time":float,"end_time":float,"score":int,"hook_sentence":"string","virality_reason":"string","central_theme":"string"{sales_angle_json_fields}}}]}}"""
 
 
 CHUNK_SIZE_SECONDS = 1200       # 20-min chunks for long videos
 LONG_VIDEO_THRESHOLD = 1800     # chunk videos longer than 30 min
 CHUNK_OVERLAP_SECONDS = 60
-MIN_HIGHLIGHT_DURATION_SECONDS = 15  # below the prompt's stated 20-44s floor; almost always a model error
+MIN_HIGHLIGHT_DURATION_SECONDS = 45  # hard floor — clips shorter than this get dropped
+TARGET_MAX_HIGHLIGHT_DURATION_SECONDS = 80  # soft target — paid ads can't run past 1:20
+MAX_HIGHLIGHT_DURATION_SECONDS = 120  # hard ceiling — only dropped past this; a full idea can run over the 80s target and get trimmed manually later
 GPT_CALL_TIMEOUT_SECONDS = 300  # cap LLM polls at 5 min — a wedged call should fail fast
 MAX_HIGHLIGHT_API_ATTEMPTS = 3
 
@@ -166,7 +180,7 @@ def _sanitize_highlights(raw_highlights: object, duration: float) -> List[Dict]:
             if end <= start:
                 continue
 
-        if end - start < MIN_HIGHLIGHT_DURATION_SECONDS:
+        if end - start < MIN_HIGHLIGHT_DURATION_SECONDS or end - start > MAX_HIGHLIGHT_DURATION_SECONDS:
             continue
 
         score = max(0, min(100, _coerce_int(item.get("score"), default=0)))
@@ -185,6 +199,7 @@ def _sanitize_highlights(raw_highlights: object, duration: float) -> List[Dict]:
                 "combined_score": combined_score,
                 "hook_sentence": str(item.get("hook_sentence") or "").strip(),
                 "virality_reason": str(item.get("virality_reason") or "").strip(),
+                "central_theme": str(item.get("central_theme") or "").strip(),
             }
         )
 
@@ -204,7 +219,16 @@ def detect_content_type(transcript: Dict, llm_fn: LLMFn = call_muapi_llm) -> Dic
 
 def build_transcript_text(transcript: Dict) -> str:
     segments = transcript.get("segments", [])
-    return "\n".join(f"[{s['start']:.1f}s] {s['text'].strip()}" for s in segments)
+    lines = []
+    for s in segments:
+        speaker = s.get("speaker")
+        tag = f" [{speaker}]" if speaker else ""
+        lines.append(f"[{s['start']:.1f}s]{tag} {s['text'].strip()}")
+    return "\n".join(lines)
+
+
+def _has_speaker_labels(transcript: Dict) -> bool:
+    return any(s.get("speaker") for s in transcript.get("segments", []))
 
 
 def chunk_transcript(transcript: Dict) -> List[Dict]:
@@ -243,6 +267,7 @@ def call_highlight_api(
     num_clips: int,
     is_chunk: bool = False,
     llm_fn: LLMFn = call_muapi_llm,
+    speaker_labeled: bool = False,
 ) -> Dict:
     # Ask for ~2× the user's target so dedupe has headroom, but cap so the model
     # doesn't have to generate a huge JSON payload (which times out gpt-5-mini).
@@ -261,19 +286,24 @@ def call_highlight_api(
         sales_angle_criteria = ""
         sales_angle_instruction = ""
         sales_angle_json_fields = ""
+    speaker_priority_criteria = SPEAKER_PRIORITY_CRITERIA if speaker_labeled else ""
     system = HIGHLIGHT_SYSTEM_PROMPT.format(
         virality_criteria=VIRALITY_CRITERIA,
         sales_angle_criteria=sales_angle_criteria,
+        speaker_priority_criteria=speaker_priority_criteria,
         content_type=content_info.get("content_type", "other"),
         density=content_info.get("density", "medium"),
         sales_angle_instruction=sales_angle_instruction,
         num_clips_instruction=f"Generate at least {min_clips} highlights",
         sales_angle_json_fields=sales_angle_json_fields,
+        max_duration=MAX_HIGHLIGHT_DURATION_SECONDS,
     )
     system = "\n".join(line for line in system.splitlines() if line.strip() != "-")
     base_prompt = f"{system}\n\nTranscript:\n{transcript_text}"
     prompt = base_prompt
     last_error = "unknown"
+    collected: List[Dict] = []
+    seen_spans: set = set()
 
     for attempt in range(1, MAX_HIGHLIGHT_API_ATTEMPTS + 1):
         raw = llm_fn(prompt)
@@ -281,52 +311,77 @@ def call_highlight_api(
             parsed = _parse_json_loose(raw)
             highlights = _sanitize_highlights(parsed.get("highlights"), duration=duration)
             if highlights:
-                return {"highlights": highlights}
-            last_error = "no valid highlights in response"
+                for h in highlights:
+                    span = (round(float(h["start_time"])), round(float(h["end_time"])))
+                    if span not in seen_spans:
+                        seen_spans.add(span)
+                        collected.append(h)
+            else:
+                last_error = "no valid highlights in response"
         except Exception as e:
             last_error = str(e)
 
+        if len(collected) >= min_clips:
+            return {"highlights": collected}
+
         if attempt < MAX_HIGHLIGHT_API_ATTEMPTS:
             print(
-                f"[highlights] invalid model output on attempt {attempt}/{MAX_HIGHLIGHT_API_ATTEMPTS}; retrying",
+                f"[highlights] only {len(collected)}/{min_clips} highlights after attempt {attempt}/{MAX_HIGHLIGHT_API_ATTEMPTS}; retrying for more",
                 flush=True,
             )
+            still_needed = min_clips - len(collected)
             prompt = (
                 base_prompt
                 + "\n\nIMPORTANT: Return ONLY valid JSON with a top-level 'highlights' array."
-                + " Each item must include: title, start_time, end_time, score, hook_sentence, virality_reason."
+                + " Each item must include: title, start_time, end_time, score, hook_sentence, virality_reason, central_theme."
                 + " No markdown fences, no commentary."
-                + " Your previous response used end_time - start_time spans that were too short (just the hook"
-                + " sentence's own timestamp). start_time/end_time must bound the WHOLE highlight clip —"
-                + " end_time - start_time must be at least 20 seconds, ideally 45-90."
+                + f" Your previous response only produced {len(collected)} usable highlight(s), which is short of the"
+                + f" requested minimum of {min_clips}. Propose at least {still_needed} DIFFERENT highlights this time,"
+                + " covering moments not already used, so the combined total reaches the minimum."
+                + " start_time/end_time must bound the WHOLE highlight clip, and end_time - start_time must be"
+                + f" at least 45 seconds, targeting 45-80s, and never longer than {MAX_HIGHLIGHT_DURATION_SECONDS} seconds."
             )
+
+    if collected:
+        return {"highlights": collected}
 
     raise RuntimeError(
         f"Highlight generator produced invalid output after {MAX_HIGHLIGHT_API_ATTEMPTS} attempts: {last_error}"
     )
 
 
-def _apply_sales_angle_fallback(highlights: List[Dict]) -> List[Dict]:
-    """If no candidate clears SALES_ANGLE_MIN_SCORE, this video just doesn't
-    have a clear sales angle — fall back to ranking by virality alone instead
-    of blending in a near-zero sales angle score for every clip."""
+def _filter_by_sales_angle(highlights: List[Dict]) -> List[Dict]:
+    """Keep every candidate that landed one of the defined sales angles at all —
+    volume over precision. The numeric sales_angle_score is kept on each clip as
+    a signal for manual review, but it no longer gates what gets rendered: the
+    user reviews the batch themselves and decides what goes, rather than trusting
+    a single threshold to pre-judge quality. Only candidates with no angle match
+    (empty "sales_angle") are dropped, since those are off-topic for these 4
+    angles entirely. A video with no on-angle candidate at all legitimately
+    produces zero clips; the caller (pipeline.py) already raises a clear error
+    in that case instead of silently shipping off-angle content."""
     if not SALES_ANGLES_ENABLED or not highlights:
         return highlights
 
-    best = max((h.get("sales_angle_score", 0) for h in highlights), default=0)
-    if best >= SALES_ANGLE_MIN_SCORE:
-        return highlights
+    kept = [h for h in highlights if h.get("sales_angle", "").strip()]
+    dropped = len(highlights) - len(kept)
+    if dropped:
+        print(
+            f"[highlights] dropped {dropped} candidate(s) with no matching sales angle at all "
+            f"— every remaining candidate touches one of the 4 angles, sales_angle_score is kept "
+            f"as a review signal only (no threshold applied)",
+            flush=True,
+        )
+    return kept
 
-    print(
-        f"[highlights] no candidate clears the sales-angle threshold "
-        f"(best sales_angle_score={best:.0f} < {SALES_ANGLE_MIN_SCORE:.0f}) — "
-        "falling back to virality-only ranking for this video",
-        flush=True,
-    )
-    for h in highlights:
-        h["combined_score"] = h.get("score", 0)
-        h["sales_angle_fallback"] = True
-    return highlights
+
+def build_clip_transcript(transcript: Dict, start: float, end: float) -> str:
+    """Plain-text transcript for a highlight's own time window, so the user
+    can check Whisper actually transcribed that segment well — independent
+    of anything the LLM claims about the clip."""
+    segments = transcript.get("segments", [])
+    lines = [s["text"].strip() for s in segments if s["end"] > start and s["start"] < end]
+    return " ".join(lines).strip()
 
 
 def dedupe_highlights(highlights: List[Dict]) -> List[Dict]:
@@ -362,6 +417,7 @@ def get_highlights(
     """
     llm_fn = llm_fn or call_muapi_llm
     duration = transcript.get("duration", 0)
+    speaker_labeled = _has_speaker_labels(transcript)
     content_info = detect_content_type(transcript, llm_fn=llm_fn)
     print(f"[highlights] content={content_info.get('content_type')} density={content_info.get('density')} duration={duration:.0f}s", flush=True)
 
@@ -373,17 +429,24 @@ def get_highlights(
             offset = chunk.get("_offset", 0)
             text = build_transcript_text(chunk)
             print(f"[highlights] chunk {i + 1}/{len(chunks)} (offset {offset:.0f}s)", flush=True)
-            result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn)
+            try:
+                result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn, speaker_labeled=speaker_labeled)
+            except Exception as e:
+                print(f"[highlights] chunk {i + 1}/{len(chunks)} failed, skipping it: {e}", flush=True)
+                continue
             for h in result.get("highlights", []):
                 h["start_time"] = float(h["start_time"]) + offset
                 h["end_time"] = float(h["end_time"]) + offset
                 all_highlights.append(h)
-        all_highlights = _apply_sales_angle_fallback(all_highlights)
+        all_highlights = _filter_by_sales_angle(all_highlights)
         highlights = dedupe_highlights(all_highlights)
     else:
         text = build_transcript_text(transcript)
-        result = call_highlight_api(text, content_info, duration, num_clips=num_clips, llm_fn=llm_fn)
-        candidates = _apply_sales_angle_fallback(result.get("highlights", []))
+        result = call_highlight_api(text, content_info, duration, num_clips=num_clips, llm_fn=llm_fn, speaker_labeled=speaker_labeled)
+        candidates = _filter_by_sales_angle(result.get("highlights", []))
         highlights = dedupe_highlights(candidates)
+
+    for h in highlights:
+        h["transcript"] = build_clip_transcript(transcript, h["start_time"], h["end_time"])
 
     return {"highlights": highlights}

@@ -59,15 +59,22 @@ def _process_single_local(
 
     from .local.clipper import crop_highlights_local
     from .local.llm import call_local_llm
+    from .local.review import review_transcript
     from .local.subtitles import burn_subtitles, words_for_window
     from .local.transcriber import transcribe_local
-    from .config import LOCAL_SUBTITLES_ENABLED
+    from .config import LOCAL_DIARIZATION_ENABLED, LOCAL_SUBTITLES_ENABLED
 
     transcript = transcribe_local(source_path, language=language)
     if not transcript["segments"]:
         raise RuntimeError(
             "Whisper produced no segments. The video may have no detectable speech."
         )
+
+    transcript = review_transcript(source_path, transcript, llm_fn=call_local_llm)
+
+    if LOCAL_DIARIZATION_ENABLED:
+        from .local.diarizer import diarize_and_label
+        transcript = diarize_and_label(source_path, transcript)
 
     highlights_result = get_highlights(transcript, num_clips=num_clips, llm_fn=call_local_llm)
     all_highlights: List[Dict] = highlights_result.get("highlights", [])

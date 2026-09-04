@@ -39,8 +39,10 @@ def _print_single_result(result: dict, header: bool = False) -> None:
         print(f"     hook:        {s.get('hook_sentence')}")
         if s.get("sales_angle"):
             print(f"     sales angle: {s.get('sales_angle')}")
-        elif s.get("sales_angle_fallback"):
-            print(f"     sales angle: none found in this video — ranked by general virality")
+        if s.get("central_theme"):
+            print(f"     theme:       {s.get('central_theme')}")
+        if s.get("transcript"):
+            print(f"     transcript:  {s.get('transcript')}")
         if s.get("clip_url"):
             print(f"     clip:   {s['clip_url']}")
         else:
