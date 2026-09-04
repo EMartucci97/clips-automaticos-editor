@@ -29,14 +29,47 @@ _TRANSCRIPT_CACHE = None
 
 SEGMENT_ANALYSIS_PROMPT = """Sos un editor de video que analiza un tramo de transcripción de una entrevista/podcast en español.
 
-Te paso el texto transcripto de un tramo puntual (puede tener errores de transcripción, ignorá los que sean obvios). Tu tarea:
-1. Identificá el TEMA CENTRAL del tramo: una frase corta y concreta.
-2. Identificá los SUBTEMAS que se tocan dentro de ese tramo, en el orden en que aparecen. Si el tramo es corto o homogéneo, puede haber un solo subtema (igual al tema central).
+Cada línea del texto está marcada con su timestamp absoluto en segundos dentro del video completo, con el formato "[123.4s] texto" (puede tener errores de transcripción, ignorá los que sean obvios). Tu tarea:
+1. Identificá el TEMA CENTRAL del tramo completo: una frase corta y concreta.
+2. Identificá los SUBTEMAS que se tocan dentro del tramo, en el orden en que aparecen. Si el tramo es corto u homogéneo, puede haber un solo subtema que ocupe todo el rango.
+3. Cada subtema tiene que ser un CLIP POTENCIAL: tiene que durar COMO MÍNIMO 40 segundos y alcanzar a contar algo completo e interesante (una anécdota, una reflexión, un dato explicado con su contexto) — no un dato suelto ni una frase aislada. Si varias ideas cortas y relacionadas no llegan solas a los 40 segundos, agrupalas en un mismo subtema en vez de partirlas.
+4. Para CADA subtema, indicá start_time y end_time (float, en segundos, timestamps absolutos tomados de las líneas): el tramo exacto donde se desarrolla esa idea, desde que arranca a tocarse hasta que termina — sin cortar una frase a la mitad. Los rangos deben estar dentro de [{start:.1f}, {end:.1f}] y no deben superponerse entre sí.
 
 Devolvé SOLO este JSON, sin texto adicional ni markdown:
-{{"central_theme":"string","subtopics":["string", "string"]}}
+{{"central_theme":"string","subtopics":[{{"text":"string","start_time":float,"end_time":float}}]}}
 
-Texto del tramo:
+Texto del tramo (con timestamps):
+\"\"\"{text}\"\"\""""
+
+# Overlapping fixed-size windows are a purely mechanical device to keep each
+# LLM call within a manageable amount of text. They do NOT define clip
+# boundaries, and coverage is not required — see FULL_VIDEO_TOPICS_PROMPT.
+# The 5-minute overlap between consecutive windows exists so a clip near a
+# window edge is still fully contained, with margin, in at least one
+# window's interior.
+FULL_VIDEO_WINDOW_SECONDS = 900.0
+FULL_VIDEO_STRIDE_SECONDS = 600.0
+
+FULL_VIDEO_TOPICS_PROMPT = """Sos un editor de video que busca CLIPS DE ALTA CALIDAD dentro de un tramo de la transcripción de una entrevista/podcast en español. Este tramo va de {start:.1f}s a {end:.1f}s dentro de un video más largo — no tenés el resto del video, solo tenés que ocuparte de este tramo.
+
+Cada línea está marcada con su timestamp absoluto en segundos, formato "[123.4s] texto" (puede tener errores de transcripción, ignorá los obvios).
+
+Tu tarea NO es cubrir el tramo de punta a punta ni dividirlo en partes consecutivas. Tu tarea es ENCONTRAR la mayor cantidad posible de clips genuinamente interesantes: cada clip es un diálogo o desarrollo de UN tema que se sostiene solo, con arranque y cierre de idea — no un dato suelto ni una frase cortada a la mitad.
+
+Reglas:
+1. Buscá TODOS los fragmentos interesantes del tramo, no solo el mejor. Maximizá la cantidad de clips encontrados: un tramo de 15 minutos de una buena entrevista normalmente tiene varios clips potenciales, no uno solo.
+2. Cada clip tiene que durar COMO MÍNIMO 40 segundos.
+3. start_time y end_time salen EXCLUSIVAMENTE de dónde arranca y termina la idea en el texto — nunca cortes una frase ni un pensamiento a la mitad. Si hace falta que el clip dure 90 segundos para cerrar la idea, que dure 90; no fuerces una duración fija.
+4. Los clips PUEDEN superponerse entre sí, total o parcialmente — eso es esperado y deseable, no un error. Por ejemplo, un clip corto y filoso sobre un momento puntual y otro más largo que incluye ese mismo momento con más contexto alrededor son AMBOS válidos si cada uno funciona por separado. No fuerces que los clips sean consecutivos ni que no se toquen entre sí.
+5. Ignorá sin culpa las partes sin sustancia (chicanas, silencios, cambios de tema sin desarrollo) — no hace falta asignarles ningún clip ni cubrir esos huecos.
+6. Si en este tramo no hay nada que valga la pena, devolvé una lista vacía.
+
+Para CADA clip encontrado indicá: title (frase corta y concreta que resuma el tema) y start_time / end_time (float, timestamps absolutos).
+
+Devolvé SOLO este JSON, sin texto adicional ni markdown:
+{{"clips":[{{"title":"string","start_time":float,"end_time":float}}]}}
+
+Transcripción del tramo (con timestamps):
 \"\"\"{text}\"\"\""""
 
 
@@ -156,6 +189,127 @@ def _transcript_text_for_range(transcript: dict, start: float, end: float) -> st
     return " ".join(w for w in words_out if w).strip()
 
 
+def _transcript_lines_for_range(transcript: dict, start: float, end: float) -> str:
+    """Per-segment transcript lines tagged with absolute timestamps, e.g.
+    '[123.4s] texto...', so the LLM can point back at real time ranges for
+    each subtopic instead of just returning prose."""
+    lines = []
+    for seg in transcript.get("segments", []):
+        if seg["end"] < start or seg["start"] > end:
+            continue
+        text = seg["text"].strip()
+        if text:
+            lines.append(f"[{seg['start']:.1f}s] {text}")
+    return "\n".join(lines)
+
+
+MIN_SUBTOPIC_SECONDS = 40.0
+
+
+def _sanitize_subtopic_clips(raw_subtopics: object, start: float, end: float) -> list:
+    """Normalize LLM subtopic output into clip dicts clamped to the parent
+    highlight's own [start, end] range; drop anything degenerate; merge any
+    subtopic shorter than MIN_SUBTOPIC_SECONDS into its neighbor so short,
+    isolated snippets don't end up as standalone clip candidates."""
+    if not isinstance(raw_subtopics, list):
+        return []
+
+    cleaned = []
+    for item in raw_subtopics:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            s = float(item.get("start_time"))
+            e = float(item.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        s = max(start, min(s, end))
+        e = max(start, min(e, end))
+        if e - s < 1.0:
+            continue
+        cleaned.append({"text": text, "start_time": s, "end_time": e})
+
+    cleaned.sort(key=lambda c: c["start_time"])
+
+    merged = []
+    for c in cleaned:
+        if merged and merged[-1]["end_time"] - merged[-1]["start_time"] < MIN_SUBTOPIC_SECONDS:
+            prev = merged[-1]
+            prev["end_time"] = c["end_time"]
+            prev["text"] = f"{prev['text']} {c['text']}"
+        else:
+            merged.append(dict(c))
+
+    while len(merged) >= 2 and merged[-1]["end_time"] - merged[-1]["start_time"] < MIN_SUBTOPIC_SECONDS:
+        last = merged.pop()
+        merged[-1]["end_time"] = last["end_time"]
+        merged[-1]["text"] = f"{merged[-1]['text']} {last['text']}"
+
+    return merged
+
+
+def _transcript_duration(transcript: dict) -> float:
+    duration = transcript.get("duration")
+    if duration:
+        return float(duration)
+    segments = transcript.get("segments", [])
+    return float(segments[-1]["end"]) if segments else 0.0
+
+
+def _clip_iou(a: tuple, b: tuple) -> float:
+    """Intersection-over-union of two (start, end) time ranges."""
+    inter = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+    union = max(a[1], b[1]) - min(a[0], b[0])
+    return inter / union if union > 0 else 0.0
+
+
+def _sanitize_clip_candidates(raw_clips: object, duration: float) -> list:
+    """Normalize LLM clip-candidate output: clamp ranges to [0, duration],
+    drop anything under the minimum clip length, and collapse near-identical
+    duplicates that show up when the same clip gets detected in more than
+    one overlapping window. Distinct clips are deliberately left overlapping
+    or nested — overlap is a feature of this model, not noise to remove."""
+    if not isinstance(raw_clips, list):
+        return []
+
+    cleaned = []
+    for item in raw_clips:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        try:
+            s = float(item.get("start_time"))
+            e = float(item.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        s = max(0.0, min(s, duration))
+        e = max(0.0, min(e, duration))
+        # Small tolerance below the 40s floor for LLM rounding — this is a
+        # sanity check, not the definition of a valid clip.
+        if e - s < MIN_SUBTOPIC_SECONDS - 5.0:
+            continue
+        cleaned.append({"title": title, "start_time": s, "end_time": e})
+
+    # Longer candidates first so a duplicate pair keeps its more complete
+    # version when only one survives the merge below.
+    cleaned.sort(key=lambda c: (c["start_time"], -(c["end_time"] - c["start_time"])))
+
+    deduped = []
+    for c in cleaned:
+        c_range = (c["start_time"], c["end_time"])
+        if any(_clip_iou(c_range, (d["start_time"], d["end_time"])) >= 0.7 for d in deduped):
+            continue
+        deduped.append(c)
+
+    deduped.sort(key=lambda c: c["start_time"])
+    return deduped
+
+
 @app.route("/api/transcript_range", methods=["GET"])
 def api_transcript_range():
     try:
@@ -176,7 +330,18 @@ def api_analyze_segment():
     if not text:
         return jsonify({"central_theme": "", "subtopics": []})
 
-    prompt = SEGMENT_ANALYSIS_PROMPT.format(text=text)
+    try:
+        start = float(body.get("start"))
+        end = float(body.get("end"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "start/end required"}), 400
+    if end <= start:
+        return jsonify({"error": "end must be after start"}), 400
+
+    transcript = _get_transcript(SOURCE_PATH)
+    timed_text = _transcript_lines_for_range(transcript, start, end) or text
+
+    prompt = SEGMENT_ANALYSIS_PROMPT.format(text=timed_text, start=start, end=end)
     try:
         raw = call_local_llm(prompt)
         parsed = _parse_json_loose(raw)
@@ -186,8 +351,152 @@ def api_analyze_segment():
 
     return jsonify({
         "central_theme": str(parsed.get("central_theme", "")).strip(),
-        "subtopics": [str(s).strip() for s in (parsed.get("subtopics") or []) if str(s).strip()],
+        "subtopics": _sanitize_subtopic_clips(parsed.get("subtopics"), start, end),
     })
+
+
+def _overlapping_windows(duration: float, window_seconds: float, stride_seconds: float) -> list:
+    """Build fixed-size, overlapping [start, end) windows covering
+    [0, duration]. Purely a mechanical device to bound how much text goes
+    into a single LLM call — it does not define clip boundaries and does
+    not need to produce non-overlapping or gap-free coverage on its own."""
+    if duration <= window_seconds:
+        return [(0.0, duration)]
+    windows = []
+    start = 0.0
+    while True:
+        end = min(start + window_seconds, duration)
+        windows.append((start, end))
+        if end >= duration:
+            break
+        start += stride_seconds
+    return windows
+
+
+@app.route("/api/analyze_full_video", methods=["POST"])
+def api_analyze_full_video():
+    transcript = _get_transcript(SOURCE_PATH)
+    duration = _transcript_duration(transcript)
+    if duration <= 0:
+        return jsonify({"error": "no transcript available"}), 400
+
+    # One LLM call per overlapping window instead of a single call over the
+    # whole transcript, purely so each call sees a manageable amount of
+    # text — this is not a content decision. Consecutive windows overlap by
+    # FULL_VIDEO_WINDOW_SECONDS - FULL_VIDEO_STRIDE_SECONDS so any single
+    # clip is fully contained, with margin, inside at least one window;
+    # duplicate detections from the overlap get merged in
+    # _sanitize_clip_candidates. Clips are intentionally allowed to overlap
+    # each other — see FULL_VIDEO_TOPICS_PROMPT.
+    raw_clips = []
+    windows = _overlapping_windows(duration, FULL_VIDEO_WINDOW_SECONDS, FULL_VIDEO_STRIDE_SECONDS)
+    for win_start, win_end in windows:
+        timed_text = _transcript_lines_for_range(transcript, win_start, win_end)
+        if timed_text.strip():
+            prompt = FULL_VIDEO_TOPICS_PROMPT.format(text=timed_text, start=win_start, end=win_end)
+            try:
+                raw = call_local_llm(prompt)
+                parsed = _parse_json_loose(raw)
+                raw_clips.extend(parsed.get("clips") or [])
+            except Exception as e:
+                print(f"[editor] analyze_full_video window [{win_start:.0f},{win_end:.0f}] failed: {e}", flush=True)
+
+    if not raw_clips:
+        return jsonify({"error": "no clips detected"}), 500
+
+    clips = _sanitize_clip_candidates(raw_clips, duration)
+
+    cache_path = _highlights_cache_path(SOURCE_PATH)
+    highlights = []
+    if cache_path.exists():
+        with open(cache_path) as f:
+            highlights = json.load(f)
+
+    # Drop any temas from a previous run of this endpoint before appending
+    # the fresh batch, so re-running doesn't pile up stale duplicates.
+    highlights = [h for h in highlights if h.get("kind") != "tema"]
+    next_id = max((h["id"] for h in highlights), default=-1) + 1
+
+    for clip in clips:
+        highlights.append({
+            "id": next_id,
+            "kind": "tema",
+            "title": clip["title"],
+            "central_theme": clip["title"],
+            "start_time": clip["start_time"],
+            "end_time": clip["end_time"],
+            "sales_angle": "",
+            "score": None,
+            "sales_angle_score": None,
+            "hook_sentence": "",
+            # Each clip is already a complete, self-contained candidate (not
+            # a container to be split further), so it points to itself here
+            # — this lets the frontend reuse it directly instead of firing
+            # an on-demand /api/analyze_segment call when it's opened.
+            "subtopics": [{
+                "text": clip["title"],
+                "start_time": clip["start_time"],
+                "end_time": clip["end_time"],
+            }],
+        })
+        next_id += 1
+
+    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+    with open(cache_path, "w") as f:
+        json.dump(highlights, f, indent=2, ensure_ascii=False)
+    print(f"[editor] wrote {len(clips)} full-video clip(s) -> {cache_path}", flush=True)
+
+    return jsonify(highlights)
+
+
+SILENCE_MIN_GAP_SECONDS = 0.3
+SILENCE_PAD_SECONDS = 0.08
+
+
+@app.route("/api/detect_silences", methods=["GET"])
+def api_detect_silences():
+    """Word-level pause detection for the clip editor's 'quitar silencios'
+    tool. Reuses the same Whisper word timestamps already produced for
+    transcription/highlights instead of a separate audio-amplitude silence
+    pass — a gap between two spoken words within [start, end] longer than
+    SILENCE_MIN_GAP_SECONDS is a candidate cut, padded slightly on each side
+    so the cut doesn't clip the tail/head of adjacent speech."""
+    try:
+        start = float(request.args.get("start", 0))
+        end = float(request.args.get("end", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid start/end"}), 400
+    if end <= start:
+        return jsonify({"error": "end must be after start"}), 400
+
+    transcript = _get_transcript(SOURCE_PATH)
+    words = []
+    for seg in transcript.get("segments", []):
+        if seg["end"] < start or seg["start"] > end:
+            continue
+        for w in (seg.get("words") or []):
+            if w["end"] >= start and w["start"] <= end:
+                words.append(w)
+    words.sort(key=lambda w: w["start"])
+
+    gaps = []
+    cursor = start
+    for w in words:
+        w_start = max(start, w["start"])
+        if w_start - cursor >= SILENCE_MIN_GAP_SECONDS:
+            gaps.append({
+                "start_time": round(cursor + SILENCE_PAD_SECONDS, 2),
+                "end_time": round(w_start - SILENCE_PAD_SECONDS, 2),
+            })
+        cursor = max(cursor, min(w["end"], end))
+    if end - cursor >= SILENCE_MIN_GAP_SECONDS:
+        gaps.append({
+            "start_time": round(cursor + SILENCE_PAD_SECONDS, 2),
+            "end_time": round(end - SILENCE_PAD_SECONDS, 2),
+        })
+
+    gaps = [g for g in gaps if g["end_time"] - g["start_time"] > 0.05]
+    return jsonify({"gaps": gaps})
 
 
 @app.route("/api/highlights", methods=["GET"])
@@ -216,6 +525,13 @@ def api_patch_highlight(highlight_id):
         match["end_time"] = float(body["end_time"])
     if "transcript_override" in body:
         match["transcript_override"] = str(body["transcript_override"])
+    if "color" in body:
+        match["color"] = str(body["color"])
+    if "cuts" in body:
+        match["cuts"] = [
+            {"start_time": float(c["start_time"]), "end_time": float(c["end_time"])}
+            for c in body["cuts"]
+        ]
 
     with open(cache_path, "w") as f:
         json.dump(highlights, f, indent=2, ensure_ascii=False)
