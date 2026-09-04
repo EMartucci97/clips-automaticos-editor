@@ -1,8 +1,11 @@
-"""Local LLM backend — OpenAI or Gemini, selected by LLM_PROVIDER."""
+"""Local LLM backend — OpenAI, Gemini, or Anthropic, selected by LLM_PROVIDER."""
 from ..config import (
+    ANTHROPIC_MODEL,
+    ANTHROPIC_WORKSPACE_ID,
     GEMINI_MODEL,
     LLM_PROVIDER,
     OPENAI_MODEL,
+    require_anthropic_key,
     require_gemini_key,
     require_openai_key,
 )
@@ -50,6 +53,27 @@ def call_gemini_llm(prompt: str) -> str:
     return response.text or ""
 
 
+def call_anthropic_llm(prompt: str) -> str:
+    """Anthropic Messages API backend used by --mode local when LLM_PROVIDER=anthropic."""
+    try:
+        import anthropic  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "anthropic is required for LLM_PROVIDER=anthropic. Install it with:\n"
+            "    pip install anthropic"
+        ) from e
+
+    client = anthropic.Anthropic(api_key=require_anthropic_key())
+    extra_headers = {"anthropic-workspace-id": ANTHROPIC_WORKSPACE_ID} if ANTHROPIC_WORKSPACE_ID else None
+    response = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=8192,
+        messages=[{"role": "user", "content": prompt}],
+        extra_headers=extra_headers,
+    )
+    return "".join(block.text for block in response.content if block.type == "text")
+
+
 def call_local_llm(prompt: str) -> str:
     """Dispatch to the configured local LLM provider."""
     provider = (LLM_PROVIDER or "openai").strip().lower()
@@ -57,6 +81,8 @@ def call_local_llm(prompt: str) -> str:
         return call_openai_llm(prompt)
     if provider == "gemini":
         return call_gemini_llm(prompt)
+    if provider == "anthropic":
+        return call_anthropic_llm(prompt)
     raise RuntimeError(
-        f"Unknown LLM_PROVIDER={provider!r}. Use 'openai' or 'gemini'."
+        f"Unknown LLM_PROVIDER={provider!r}. Use 'openai', 'gemini', or 'anthropic'."
     )

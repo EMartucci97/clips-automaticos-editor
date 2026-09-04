@@ -15,6 +15,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
+ANTHROPIC_WORKSPACE_ID = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
 LOCAL_WHISPER_MODEL = os.getenv("LOCAL_WHISPER_MODEL", "medium")
 LOCAL_WHISPER_DEVICE = os.getenv("LOCAL_WHISPER_DEVICE", "auto")  # auto / cpu / cuda
@@ -114,3 +117,13 @@ def require_gemini_key() -> str:
             "Add it to your .env or export it, or switch LLM_PROVIDER back to openai."
         )
     return GEMINI_API_KEY
+
+
+def require_anthropic_key() -> str:
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Local mode needs an Anthropic key when "
+            "LLM_PROVIDER=anthropic. Add it to your .env or export it, or switch "
+            "LLM_PROVIDER back to openai."
+        )
+    return ANTHROPIC_API_KEY
