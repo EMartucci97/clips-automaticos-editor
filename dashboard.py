@@ -215,6 +215,28 @@ def _find_result_json_metadata(clip_path: str):
     return None
 
 
+def _load_captions_preference(source: str, start: float, end: float) -> bool:
+    """Per-highlight on/off preference for burned subtitles, set via the
+    'Subtítulos' toggle in the standalone editor (editor_server.py, static/
+    editor.html) and stored alongside its highlights cache. Defaults to True
+    (subtitles on) when there's no editor cache, or no highlight there
+    matches this start/end closely enough — same default this checkbox
+    always had before the toggle existed."""
+    if not source:
+        return True
+    stem = os.path.splitext(os.path.basename(source))[0]
+    cache_path = os.path.join(LOCAL_OUTPUT_DIR, f"{stem}.editor_highlights.json")
+    try:
+        with open(cache_path) as f:
+            highlights = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return True
+    for h in highlights:
+        if abs(h.get("start_time", -1e9) - start) < 1.0 and abs(h.get("end_time", -1e9) - end) < 1.0:
+            return bool(h.get("captions_enabled", True))
+    return True
+
+
 def _load_clip_metadata(clip_path: str):
     try:
         with open(_metadata_path(clip_path)) as f:
@@ -404,7 +426,8 @@ if job:
         st.session_state.overrides = overrides
 
         aspect_ratio = st.selectbox("Aspect ratio", ["9:16", "1:1", "4:5"], index=0)
-        burn_subs = st.checkbox("Quemar subtítulos", value=True)
+        captions_default = _load_captions_preference(job["source"], job["start"], job["end"])
+        burn_subs = st.checkbox("Quemar subtítulos", value=captions_default, key=f"burn_subs_{job_key}")
 
         split_screen = st.checkbox(
             "Split screen (arriba/abajo)", value=False, key=f"split_{job['filename']}",

@@ -527,6 +527,8 @@ def api_patch_highlight(highlight_id):
         match["transcript_override"] = str(body["transcript_override"])
     if "color" in body:
         match["color"] = str(body["color"])
+    if "captions_enabled" in body:
+        match["captions_enabled"] = bool(body["captions_enabled"])
     if "cuts" in body:
         match["cuts"] = [
             {"start_time": float(c["start_time"]), "end_time": float(c["end_time"])}

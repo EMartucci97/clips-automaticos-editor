@@ -296,6 +296,7 @@
   }
   #functions button:hover:not(:disabled) { background: var(--row-hover); border-color: var(--accent-line); }
   #functions button:disabled { color: var(--text-faint); cursor: not-allowed; }
+  #functions button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 
   /* Clips list */
   #clips-list-wrap { margin: 22px 24px; }
@@ -945,11 +946,28 @@ function selectHighlight(id) {
     </div>
     <div id="functions">
       <button id="open-clip-editor-btn">Editar clip</button>
-      <button disabled title="Próximamente">Formato</button>
+      <button id="captions-toggle-btn" title="Subtítulos quemados al exportar este clip (blanco/ámbar por hablante)"></button>
     </div>
   `;
 
   document.getElementById('open-clip-editor-btn').addEventListener('click', () => openClipEditor(h));
+
+  const captionsBtn = document.getElementById('captions-toggle-btn');
+  const renderCaptionsBtn = () => {
+    const on = h.captions_enabled !== false; // default ON, matches dashboard.py's prior hardcoded default
+    captionsBtn.classList.toggle('active', on);
+    captionsBtn.textContent = on ? 'Subtítulos ✓' : 'Subtítulos ✕';
+  };
+  renderCaptionsBtn();
+  captionsBtn.addEventListener('click', () => {
+    h.captions_enabled = h.captions_enabled === false; // was off (explicit false) -> turn on; anything else (on/missing) -> turn off
+    renderCaptionsBtn();
+    fetch(`/api/highlights/${h.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ captions_enabled: h.captions_enabled }),
+    }).catch(err => console.error('[editor] failed to save captions_enabled', err));
+  });
 
   const transcriptEl = document.getElementById('segment-transcript');
   transcriptEl.addEventListener('blur', () => onSegmentTranscriptEdited(h.id));
