@@ -3,70 +3,103 @@
 <head>
 <meta charset="utf-8">
 <title>Editor de clips</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: dark;
-    --bg: #14161a;
-    --panel: #1c1f26;
-    --border: #2b2f38;
-    --text: #e6e8eb;
-    --muted: #8a8f99;
-    --accent: #4f8cff;
+    --bg: #0e0d11;
+    --panel: #17161b;
+    --panel-alt: #1c1b21;
+    --row-hover: #1f1e24;
+    --border: #29282f;
+    --border-soft: #201f25;
+    --text: #ededef;
+    --muted: #9a98a2;
+    --text-faint: #56545c;
+    --accent: #ffb100;
+    --accent-dim: rgba(255, 177, 0, 0.12);
+    --accent-line: rgba(255, 177, 0, 0.35);
+    --accent-ink: #1a1200;
+    --sub-color: #3d5a99;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     background: var(--bg);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
+  .mono { font-family: 'JetBrains Mono', monospace; }
   header {
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-soft);
     display: flex;
     align-items: center;
     justify-content: space-between;
   }
-  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
-  header .status { font-size: 12px; color: var(--muted); }
+  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.2px; }
+  header .status { font-size: 12px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; }
+  #header-actions { display: flex; align-items: center; gap: 14px; }
+  #analyze-full-btn {
+    font-family: 'Inter', sans-serif;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 9px 16px;
+    border-radius: 7px;
+    border: none;
+    background: var(--accent);
+    color: var(--accent-ink);
+    cursor: pointer;
+  }
+  #analyze-full-btn:hover:not(:disabled) { background: #ffc229; }
+  #analyze-full-btn:disabled { background: var(--panel-alt); color: var(--text-faint); cursor: not-allowed; }
 
-  #player-wrap { padding: 16px 20px 0; }
-  video { width: 100%; max-height: 62vh; background: #000; border-radius: 6px; display: block; }
+  #player-wrap { padding: 20px 24px 0; }
+  video {
+    width: 100%; max-height: 62vh; background: #000; border-radius: 14px; display: block;
+    border: 1px solid var(--border-soft);
+  }
 
-  #timeline-wrap { padding: 14px 20px 20px; }
+  #timeline-wrap { padding: 18px 24px 24px; }
 
   #timeline-toolbar {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     font-size: 12px;
     color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
   }
   #timeline-toolbar button {
-    width: 22px;
-    height: 22px;
-    background: #22262f;
+    width: 24px;
+    height: 24px;
+    background: var(--panel-alt);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
     font-size: 14px;
     line-height: 1;
+    font-family: 'Inter', sans-serif;
   }
-  #timeline-toolbar button:hover { background: #2b3038; }
-  #zoom-fit { width: auto; padding: 0 8px; font-size: 11px; }
-  #zoom-slider { width: 140px; }
+  #timeline-toolbar button:hover { background: var(--row-hover); border-color: var(--accent-line); }
+  #zoom-fit { width: auto; padding: 0 9px; font-size: 11px; }
+  #zoom-slider { width: 140px; accent-color: var(--accent); }
   #zoom-label { min-width: 42px; }
+  #isolate-btn { width: auto; padding: 0 9px; font-size: 11px; font-family: 'Inter', sans-serif; }
+  #isolate-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
   #zoom-hint { margin-left: auto; }
 
   #timeline-ruler {
     position: relative;
     height: 18px;
     background: var(--panel);
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-soft);
     border-bottom: none;
-    border-radius: 6px 6px 0 0;
+    border-radius: 12px 12px 0 0;
     overflow: hidden;
   }
   #ruler-canvas {
@@ -78,10 +111,10 @@
   }
   #timeline-viewport {
     position: relative;
-    height: 64px;
+    height: 88px;
     background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 0 0 6px 6px;
+    border: 1px solid var(--border-soft);
+    border-radius: 0 0 12px 12px;
     overflow: hidden;
   }
   #waveform-canvas {
@@ -98,7 +131,7 @@
   }
   #timeline {
     position: relative;
-    height: 64px;
+    height: 88px;
     min-width: 100%;
     cursor: pointer;
     will-change: transform;
@@ -113,7 +146,8 @@
   }
   .marker {
     position: absolute;
-    top: 8px; bottom: 8px;
+    top: 6px;
+    height: 36px;
     background: color-mix(in srgb, var(--marker-color, var(--accent)) 55%, transparent);
     border: 1px solid var(--marker-color, var(--accent));
     border-radius: 4px;
@@ -121,6 +155,20 @@
   }
   .marker:hover { background: color-mix(in srgb, var(--marker-color, var(--accent)) 80%, transparent); }
   .marker.selected { outline: 2px solid #fff; outline-offset: 1px; }
+  .marker-number {
+    position: absolute;
+    top: 50%;
+    left: 3px;
+    transform: translateY(-50%);
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+    z-index: 2;
+    white-space: nowrap;
+  }
   .handle {
     position: absolute;
     top: 0; bottom: 0;
@@ -131,6 +179,18 @@
   .handle.left { left: -4px; }
   .handle.right { right: -4px; }
 
+  .submarker {
+    position: absolute;
+    top: 48px;
+    height: 30px;
+    background: color-mix(in srgb, var(--sub-color) 55%, transparent);
+    border: 1px solid var(--sub-color);
+    border-radius: 3px;
+    min-width: 3px;
+    cursor: pointer;
+  }
+  .submarker:hover { background: color-mix(in srgb, var(--sub-color) 85%, transparent); }
+
   #time-labels {
     display: flex;
     justify-content: space-between;
@@ -140,36 +200,37 @@
   }
 
   #detail {
-    margin: 0 20px 20px;
-    padding: 14px 16px;
+    margin: 0 24px 24px;
+    padding: 16px 18px;
     background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    border: 1px solid var(--border-soft);
+    border-radius: 14px;
     min-height: 90px;
   }
-  #detail .empty { color: var(--muted); font-size: 13px; }
+  #detail .empty { color: var(--text-faint); font-size: 13px; }
   #detail .angle {
     display: inline-block;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--marker-color, var(--accent)) 25%, transparent);
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--marker-color, var(--accent)) 16%, transparent);
     border: 1px solid var(--marker-color, var(--accent));
+    color: var(--marker-color, var(--accent));
     margin-bottom: 8px;
   }
   #detail h2 { font-size: 15px; margin: 0 0 6px; }
   #detail p { font-size: 13px; color: var(--muted); margin: 0 0 6px; line-height: 1.4; }
-  #detail .times { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  #detail .times { font-size: 12px; color: var(--text-faint); margin-bottom: 10px; font-family: 'JetBrains Mono', monospace; }
 
-  .detail-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .detail-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
   .detail-section h3 {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--muted);
+    color: var(--text-faint);
     margin: 0 0 6px;
     font-weight: 600;
   }
@@ -177,10 +238,10 @@
     width: 100%;
     resize: vertical;
     min-height: 64px;
-    background: #14161a;
+    background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: 8px;
     padding: 8px 10px;
     font-size: 13px;
     line-height: 1.4;
@@ -193,18 +254,340 @@
   #segment-analysis .analysis-theme { margin-bottom: 6px; }
   #segment-analysis ul { margin: 4px 0 0; padding-left: 18px; }
   #segment-analysis li { margin-bottom: 2px; }
+  #segment-analysis li.subtopic-item { cursor: pointer; }
+  #segment-analysis li.subtopic-item:hover { color: var(--text); }
+
+  #detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  #highlight-color-picker {
+    width: 26px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: none;
+    cursor: pointer;
+  }
+  #color-picker-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
 
   #functions {
     display: flex;
     gap: 8px;
   }
   #functions button {
-    font-size: 12px;
-    padding: 6px 12px;
-    border-radius: 5px;
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 7px 13px;
+    border-radius: 7px;
     border: 1px solid var(--border);
-    background: #22262f;
+    background: var(--panel-alt);
+    color: var(--text);
+    cursor: pointer;
+  }
+  #functions button:hover:not(:disabled) { background: var(--row-hover); border-color: var(--accent-line); }
+  #functions button:disabled { color: var(--text-faint); cursor: not-allowed; }
+
+  /* Clips list */
+  #clips-list-wrap { margin: 22px 24px; }
+  #clips-list-wrap h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--text-faint);
+    margin: 0 0 8px;
+    font-weight: 600;
+  }
+  #clips-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid var(--border-soft);
+    border-radius: 12px;
+    background: var(--panel);
+  }
+  .clip-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 13px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .clip-row:last-child { border-bottom: none; }
+  .clip-row:hover { background: var(--row-hover); }
+  .clip-row.selected { background: var(--accent-dim); }
+  .clip-row .clip-num {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    background: var(--marker-color, var(--accent));
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .clip-row .clip-title {
+    flex: 1;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .clip-row .clip-dur { font-size: 11px; color: var(--text-faint); flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
+
+  /* Per-clip editor modal */
+  #clip-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    backdrop-filter: blur(2px);
+  }
+  #clip-modal-overlay.open { display: flex; }
+  #clip-modal {
+    width: min(1180px, 94vw);
+    max-height: 90vh;
+    background: var(--panel);
+    border: 1px solid var(--border-soft);
+    border-radius: 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  }
+  #clip-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  #clip-modal-title-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  #clip-modal-num {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  #clip-modal-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #clip-modal-close {
+    background: none;
+    border: none;
     color: var(--muted);
+    font-size: 20px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 4px;
+  }
+  #clip-modal-close:hover { color: var(--text); }
+  #clip-modal-body { display: flex; min-height: 0; overflow: hidden; }
+  #clip-modal-video-col { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
+  #clip-modal-video { width: 100%; max-height: 40vh; background: #000; display: block; }
+  #clip-modal-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    font-size: 12px;
+    color: var(--muted);
+    border-top: 1px solid var(--border-soft);
+    border-bottom: 1px solid var(--border-soft);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  #clip-modal-toolbar button {
+    font-size: 12px;
+    padding: 6px 11px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text);
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+  }
+  #clip-modal-toolbar button:hover:not(:disabled) { background: var(--row-hover); border-color: var(--accent-line); }
+  #clip-modal-toolbar button:disabled { color: var(--text-faint); cursor: not-allowed; opacity: .5; }
+  #clip-modal-toolbar .sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+  #clip-modal-hint { margin-left: auto; font-size: 11px; }
+  #clip-modal-zoombar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px 0;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  #clip-modal-zoombar button {
+    width: 24px;
+    height: 24px;
+    background: var(--panel-alt);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    font-family: 'Inter', sans-serif;
+  }
+  #clip-modal-zoombar button:hover { background: var(--row-hover); }
+  #clip-zoom-fit { width: auto; padding: 0 9px; font-size: 11px; font-family: 'Inter', sans-serif; }
+  #clip-zoom-slider { width: 120px; accent-color: var(--accent); }
+  #clip-zoom-label { min-width: 42px; }
+  #clip-zoom-hint { margin-left: auto; font-size: 11px; }
+  #clip-modal-timeline {
+    position: relative;
+    height: 64px;
+    margin: 14px 16px 4px;
+    background: var(--bg);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  #clip-modal-waveform { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #clip-modal-track { position: relative; height: 100%; }
+  #clip-modal-range {
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+  }
+  #clip-modal-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #ff5470;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #clip-modal-selection {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(255, 84, 112, 0.25);
+    border: 1px dashed #ff5470;
+    display: none;
+    z-index: 4;
+  }
+  .clip-cut {
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    background: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.55) 0 4px, rgba(0, 0, 0, 0.35) 4px 8px);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px;
+    cursor: pointer;
+    z-index: 3;
+  }
+  .clip-cut:hover { outline: 1px solid #ff5470; }
+  #clip-modal-times {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 16px 14px;
+    font-size: 11px;
+    color: var(--text-faint);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Tools sidebar (design preview — most tools have no backend yet) */
+  #clip-modal-tools-col {
+    width: 300px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--border-soft);
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .tool-section { padding-bottom: 14px; border-bottom: 1px solid var(--border-soft); }
+  .tool-section:last-of-type { border-bottom: none; padding-bottom: 0; }
+  .tool-head {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--text-faint);
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+  .tool-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12.5px;
+    padding: 5px 0;
+  }
+  .tool-row .tool-label { color: var(--text); }
+  .tool-row .tool-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    color: var(--text-faint);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+  }
+  .tool-row.disabled .tool-label { color: var(--text-faint); }
+  .style-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .style-chip {
+    font-size: 11.5px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text-faint);
+  }
+  .style-chip.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .switch {
+    width: 32px; height: 18px; border-radius: 999px;
+    background: var(--panel-alt); border: 1px solid var(--border);
+    position: relative; flex-shrink: 0;
+  }
+  .switch::after {
+    content: ''; position: absolute; top: 1px; left: 1px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--text-faint); transition: transform .15s;
+  }
+  .switch.on { background: var(--accent-dim); border-color: var(--accent-line); }
+  .switch.on::after { background: var(--accent); transform: translateX(14px); }
+  #clip-modal-export-btn {
+    width: 100%;
+    padding: 11px;
+    border-radius: 8px;
+    border: none;
+    background: var(--panel-alt);
+    color: var(--text-faint);
+    font-size: 13px;
+    font-weight: 600;
     cursor: not-allowed;
   }
 </style>
@@ -213,7 +596,10 @@
 
 <header>
   <h1>Editor de clips</h1>
-  <span class="status" id="status">cargando highlights…</span>
+  <div id="header-actions">
+    <span class="status" id="status">cargando highlights…</span>
+    <button id="analyze-full-btn">Detectar todos los temas</button>
+  </div>
 </header>
 
 <div id="player-wrap">
@@ -227,6 +613,7 @@
     <button id="zoom-in" title="Acercar">+</button>
     <span id="zoom-label">1.0x</span>
     <button id="zoom-fit" title="Ver todo el video">Ver todo</button>
+    <button id="isolate-btn" title="Mostrar todos los clips del mismo color, numerados">Aislar</button>
     <span id="zoom-hint">Ctrl/Cmd + scroll sobre el timeline para hacer zoom</span>
   </div>
   <div id="timeline-ruler">
@@ -246,8 +633,100 @@
   </div>
 </div>
 
+<div id="clips-list-wrap">
+  <h3>Clips <span id="clips-count" class="muted"></span></h3>
+  <div id="clips-list"></div>
+</div>
+
 <div id="detail">
   <div class="empty">Elegí un marcador del timeline para ver el detalle.</div>
+</div>
+
+<div id="clip-modal-overlay">
+  <div id="clip-modal">
+    <div id="clip-modal-header">
+      <div id="clip-modal-title-wrap">
+        <span id="clip-modal-num"></span>
+        <span id="clip-modal-title"></span>
+      </div>
+      <button id="clip-modal-close" title="Cerrar">&times;</button>
+    </div>
+    <div id="clip-modal-body">
+    <div id="clip-modal-video-col">
+    <video id="clip-modal-video" src="/video" controls preload="metadata"></video>
+    <div id="clip-modal-toolbar">
+      <button id="clip-undo" title="Deshacer (Ctrl+Z)">&#8630;</button>
+      <button id="clip-redo" title="Rehacer (Ctrl+Shift+Z)">&#8631;</button>
+      <span class="sep"></span>
+      <button id="clip-cut-btn" title="Cortar el tramo marcado" disabled>Cortar selección</button>
+      <button id="clip-silence-btn" title="Detectar y quitar pausas automáticamente">Quitar silencios</button>
+      <span id="clip-modal-hint">Arrastrá sobre el clip para marcar un tramo a cortar</span>
+    </div>
+    <div id="clip-modal-zoombar">
+      <button id="clip-zoom-out" title="Alejar">&minus;</button>
+      <input type="range" id="clip-zoom-slider" min="0" max="100" value="0" step="1">
+      <button id="clip-zoom-in" title="Acercar">+</button>
+      <span id="clip-zoom-label">1.0x</span>
+      <button id="clip-zoom-fit" title="Ver todo el clip">Ver clip</button>
+      <span id="clip-zoom-hint">Ctrl/Cmd + scroll sobre la línea para hacer zoom</span>
+    </div>
+    <div id="clip-modal-timeline">
+      <canvas id="clip-modal-waveform"></canvas>
+      <div id="clip-modal-track">
+        <div id="clip-modal-range"></div>
+        <div id="clip-modal-selection"></div>
+        <div id="clip-modal-playhead"></div>
+      </div>
+    </div>
+    <div id="clip-modal-times">
+      <span id="clip-modal-time-start"></span>
+      <span id="clip-modal-time-end"></span>
+    </div>
+    </div>
+    <div id="clip-modal-tools-col">
+      <div class="tool-section">
+        <div class="tool-head">Limpieza</div>
+        <div class="tool-row disabled">
+          <span class="tool-label">Quitar muletillas</span>
+          <span class="tool-tag">Próximamente</span>
+        </div>
+      </div>
+      <div class="tool-section">
+        <div class="tool-head">Subtítulos</div>
+        <div class="tool-row">
+          <span class="tool-label">Estilo actual: palabra por palabra, color por speaker</span>
+        </div>
+        <div class="style-grid">
+          <span class="style-chip active" title="Estilo real, usado al generar el corto">Karaoke</span>
+          <span class="style-chip" title="Próximamente">Bold</span>
+          <span class="style-chip" title="Próximamente">Minimal</span>
+          <span class="style-chip" title="Próximamente">Highlight</span>
+        </div>
+      </div>
+      <div class="tool-section">
+        <div class="tool-head">Audio</div>
+        <div class="tool-row disabled">
+          <span class="tool-label">Música de fondo</span>
+          <span class="tool-tag">Próximamente</span>
+        </div>
+        <div class="tool-row disabled">
+          <span class="tool-label">Nivelar voz</span>
+          <span class="tool-tag">Próximamente</span>
+        </div>
+      </div>
+      <div class="tool-section">
+        <div class="tool-head">Encuadre</div>
+        <div class="tool-row disabled">
+          <span class="tool-label">Seguimiento de rostro</span>
+          <span class="tool-tag">Próximamente</span>
+        </div>
+      </div>
+      <div class="tool-section">
+        <button id="clip-modal-export-btn" disabled title="El render/export todavía no está conectado a este editor">Aplicar y exportar clip</button>
+      </div>
+    </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -295,6 +774,11 @@ function setScrollLeft(x) {
 }
 
 const COLORS = ['#4f8cff', '#ff9f43', '#2ecc71', '#e84393', '#00cec9', '#fdcb6e', '#a29bfe', '#ff7675'];
+const ISOLATE_COLOR = '#123a6e';
+const ISOLATE_STORAGE_KEY = 'editor.isolateMode';
+// Persisted so the toggle survives a page reload instead of silently
+// resetting to the rainbow palette every time.
+let isolateMode = localStorage.getItem(ISOLATE_STORAGE_KEY) === '1';
 
 function fmt(sec) {
   sec = Math.max(0, Math.floor(sec));
@@ -310,19 +794,100 @@ function pct(t) {
 }
 
 function colorFor(h) {
-  return COLORS[h.id % COLORS.length];
+  return h.color || COLORS[h.id % COLORS.length];
+}
+
+// In isolate mode every marker shares one dark-blue color regardless of its
+// own custom color or palette slot — colorFor(h) still holds the real
+// underlying color so it survives turning isolate mode back off.
+function displayColorFor(h) {
+  return isolateMode ? ISOLATE_COLOR : colorFor(h);
+}
+
+function renderSubmarkers() {
+  timeline.querySelectorAll('.submarker').forEach(el => el.remove());
+  const h = highlights.find(x => x.id === selectedId);
+  const clips = h && h._subtopicClips;
+  if (!clips || !clips.length) return;
+
+  clips.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'submarker';
+    el.style.left = pct(c.start_time) + '%';
+    el.style.width = Math.max(0.15, pct(c.end_time) - pct(c.start_time)) + '%';
+    el.title = c.text;
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      video.currentTime = c.start_time;
+      video.play();
+    });
+    timeline.appendChild(el);
+  });
+}
+
+// Numbering follows chronological order (start_time), not array/id order, so
+// the numbers read left-to-right along the timeline regardless of how the
+// highlights were detected or inserted. Shared by the timeline markers, the
+// clips list below it, and the per-clip editor modal so the number for a
+// given clip is always the same everywhere.
+function computeNumbering() {
+  const ordered = [...highlights].sort((a, b) => a.start_time - b.start_time);
+  return new Map(ordered.map((h, i) => [h.id, i + 1]));
+}
+
+function fmtDuration(sec) {
+  sec = Math.round(sec);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderClipsList() {
+  const listEl = document.getElementById('clips-list');
+  const countEl = document.getElementById('clips-count');
+  countEl.textContent = highlights.length ? `(${highlights.length})` : '';
+  const numberOf = computeNumbering();
+  const ordered = [...highlights].sort((a, b) => a.start_time - b.start_time);
+  listEl.innerHTML = '';
+  ordered.forEach(h => {
+    const row = document.createElement('div');
+    row.className = 'clip-row' + (h.id === selectedId ? ' selected' : '');
+    row.innerHTML = `
+      <span class="clip-num" style="--marker-color:${displayColorFor(h)}">${numberOf.get(h.id)}</span>
+      <span class="clip-title">${escapeHtml(h.title || '(sin título)')}</span>
+      <span class="clip-dur">${fmtDuration(h.end_time - h.start_time)}</span>
+    `;
+    row.addEventListener('click', () => openClipEditor(h));
+    listEl.appendChild(row);
+  });
 }
 
 function renderMarkers() {
   timeline.querySelectorAll('.marker').forEach(el => el.remove());
+  const numberOf = computeNumbering();
+
   highlights.forEach(h => {
     const el = document.createElement('div');
     el.className = 'marker' + (h.id === selectedId ? ' selected' : '');
-    el.style.setProperty('--marker-color', colorFor(h));
+    el.style.setProperty('--marker-color', displayColorFor(h));
     el.style.left = pct(h.start_time) + '%';
     el.style.width = Math.max(0.2, pct(h.end_time) - pct(h.start_time)) + '%';
     el.title = (h.sales_angle || 'sin ángulo') + ' — ' + (h.title || '');
     el.dataset.id = h.id;
+
+    if (isolateMode) {
+      const numEl = document.createElement('span');
+      numEl.className = 'marker-number';
+      numEl.textContent = String(numberOf.get(h.id));
+      el.appendChild(numEl);
+    }
 
     const left = document.createElement('div');
     left.className = 'handle left';
@@ -343,6 +908,7 @@ function renderMarkers() {
     el.appendChild(right);
     timeline.appendChild(el);
   });
+  renderSubmarkers();
 }
 
 function escapeHtml(s) {
@@ -354,10 +920,16 @@ function escapeHtml(s) {
 function selectHighlight(id) {
   selectedId = id;
   renderMarkers();
+  renderClipsList();
   const h = highlights.find(x => x.id === id);
   if (!h) return;
   detailEl.innerHTML = `
-    <span class="angle" style="--marker-color:${colorFor(h)}">${h.sales_angle || 'sin ángulo'}</span>
+    <div id="detail-header">
+      <span class="angle" style="--marker-color:${displayColorFor(h)}">${h.sales_angle || 'sin ángulo'}</span>
+      <label id="color-picker-label">Color
+        <input type="color" id="highlight-color-picker" value="${colorFor(h)}" ${isolateMode ? 'disabled title="Desactivá Aislar para editar el color"' : ''}>
+      </label>
+    </div>
     <h2>${h.title || '(sin título)'}</h2>
     <div class="times">${fmt(h.start_time)} → ${fmt(h.end_time)} · virality ${h.score ?? '-'} · sales_angle_score ${h.sales_angle_score ?? '-'}</div>
     <p>${h.central_theme || ''}</p>
@@ -372,13 +944,30 @@ function selectHighlight(id) {
       <div id="segment-analysis"><span class="muted">Cargando…</span></div>
     </div>
     <div id="functions">
-      <button disabled title="Próximamente">Sacar silencios</button>
+      <button id="open-clip-editor-btn">Editar clip</button>
       <button disabled title="Próximamente">Formato</button>
     </div>
   `;
 
+  document.getElementById('open-clip-editor-btn').addEventListener('click', () => openClipEditor(h));
+
   const transcriptEl = document.getElementById('segment-transcript');
   transcriptEl.addEventListener('blur', () => onSegmentTranscriptEdited(h.id));
+
+  const colorInput = document.getElementById('highlight-color-picker');
+  colorInput.addEventListener('input', () => {
+    h.color = colorInput.value;
+    renderMarkers();
+    const angleEl = detailEl.querySelector('.angle');
+    if (angleEl) angleEl.style.setProperty('--marker-color', h.color);
+  });
+  colorInput.addEventListener('change', () => {
+    fetch(`/api/highlights/${h.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ color: h.color }),
+    }).catch(err => console.error('[editor] failed to save color', err));
+  });
 
   loadSegmentDetail(h);
 }
@@ -396,6 +985,8 @@ async function loadSegmentDetail(h) {
   transcriptEl.value = 'Cargando transcripción…';
   transcriptEl.disabled = true;
   analysisEl.innerHTML = '<span class="muted">Cargando…</span>';
+  h._subtopicClips = null;
+  renderSubmarkers();
 
   let text = '';
   try {
@@ -411,7 +1002,38 @@ async function loadSegmentDetail(h) {
   transcriptEl.disabled = false;
   h._transcriptText = text;
 
-  analyzeSegment(h, text, reqId);
+  // Temas from the full-video batch analysis already carry their subtopics
+  // — reuse them instead of re-running an LLM call for something we already
+  // computed.
+  if (Array.isArray(h.subtopics) && h.subtopics.length) {
+    renderSubtopicsUI(h, h.subtopics, h.central_theme);
+  } else {
+    analyzeSegment(h, text, reqId);
+  }
+}
+
+function renderSubtopicsUI(h, subtopics, centralTheme) {
+  const analysisEl = document.getElementById('segment-analysis');
+  if (!analysisEl) return;
+
+  h._subtopicClips = subtopics;
+  renderSubmarkers();
+
+  const subtopicsHtml = subtopics.length
+    ? `<div class="analysis-subtopics"><strong>Subtemas:</strong><ul>${subtopics.map((s, i) => `<li class="subtopic-item" data-idx="${i}">${escapeHtml(s.text)} <span class="muted">(${fmt(s.start_time)}–${fmt(s.end_time)})</span></li>`).join('')}</ul></div>`
+    : '';
+  analysisEl.innerHTML = `
+    <div class="analysis-theme"><strong>Tema central:</strong> ${escapeHtml(centralTheme) || '(sin detectar)'}</div>
+    ${subtopicsHtml}
+  `;
+  analysisEl.querySelectorAll('.subtopic-item').forEach(li => {
+    li.addEventListener('click', () => {
+      const c = subtopics[Number(li.dataset.idx)];
+      if (!c) return;
+      video.currentTime = c.start_time;
+      video.play();
+    });
+  });
 }
 
 async function analyzeSegment(h, text, reqId) {
@@ -428,19 +1050,11 @@ async function analyzeSegment(h, text, reqId) {
     const res = await fetch('/api/analyze_segment', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, start: h.start_time, end: h.end_time }),
     });
     const data = await res.json();
     if (reqId !== undefined && (reqId !== detailRequestId || selectedId !== h.id)) return;
-
-    const subtopics = data.subtopics || [];
-    const subtopicsHtml = subtopics.length
-      ? `<div class="analysis-subtopics"><strong>Subtemas:</strong><ul>${subtopics.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul></div>`
-      : '';
-    analysisEl.innerHTML = `
-      <div class="analysis-theme"><strong>Tema central:</strong> ${escapeHtml(data.central_theme) || '(sin detectar)'}</div>
-      ${subtopicsHtml}
-    `;
+    renderSubtopicsUI(h, data.subtopics || [], data.central_theme);
   } catch (err) {
     console.error('[editor] failed to analyze segment', err);
     analysisEl.innerHTML = '<span class="muted">Error analizando el tramo.</span>';
@@ -597,6 +1211,26 @@ zoomInBtn.addEventListener('click', () => setZoom(zoomLevel * 1.5));
 zoomOutBtn.addEventListener('click', () => setZoom(zoomLevel / 1.5));
 zoomFitBtn.addEventListener('click', () => setZoom(1));
 
+const isolateBtn = document.getElementById('isolate-btn');
+// Reflect the persisted state loaded above immediately, before highlights
+// even arrive from the server.
+isolateBtn.classList.toggle('active', isolateMode);
+isolateBtn.textContent = isolateMode ? 'Aislar ✓' : 'Aislar';
+isolateBtn.addEventListener('click', () => {
+  isolateMode = !isolateMode;
+  localStorage.setItem(ISOLATE_STORAGE_KEY, isolateMode ? '1' : '0');
+  isolateBtn.classList.toggle('active', isolateMode);
+  isolateBtn.textContent = isolateMode ? 'Aislar ✓' : 'Aislar';
+  // Re-run selectHighlight (not just renderMarkers) when something is
+  // selected, so the angle badge color and the disabled color-picker state
+  // in the detail panel stay in sync with the new mode too.
+  if (selectedId != null && highlights.some(h => h.id === selectedId)) {
+    selectHighlight(selectedId);
+  } else {
+    renderMarkers();
+  }
+});
+
 timelineScroll.addEventListener('wheel', e => {
   if (!e.ctrlKey && !e.metaKey) return;
   e.preventDefault();
@@ -650,6 +1284,7 @@ function endDrag() {
     body: JSON.stringify({ start_time: h.start_time, end_time: h.end_time }),
   }).catch(err => console.error('[editor] failed to save marker', err));
   if (selectedId === h.id) loadSegmentDetail(h);
+  renderClipsList();
 }
 
 let waveformPeaks = [];
@@ -702,11 +1337,507 @@ async function loadHighlights() {
     highlights = await res.json();
     statusEl.textContent = `${highlights.length} zona(s) detectada(s)`;
     renderMarkers();
+    renderClipsList();
   } catch (err) {
     statusEl.textContent = 'error cargando highlights';
     console.error(err);
   }
 }
+
+const analyzeFullBtn = document.getElementById('analyze-full-btn');
+analyzeFullBtn.addEventListener('click', async () => {
+  analyzeFullBtn.disabled = true;
+  const originalText = analyzeFullBtn.textContent;
+  analyzeFullBtn.textContent = 'Analizando video completo…';
+  statusEl.textContent = 'detectando todos los temas (puede tardar)…';
+  try {
+    const res = await fetch('/api/analyze_full_video', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'error');
+    highlights = data;
+    statusEl.textContent = `${highlights.length} zona(s) detectada(s)`;
+    renderMarkers();
+    renderClipsList();
+  } catch (err) {
+    console.error('[editor] failed to analyze full video', err);
+    statusEl.textContent = 'error detectando temas';
+  } finally {
+    analyzeFullBtn.disabled = false;
+    analyzeFullBtn.textContent = originalText;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Per-clip editor modal (CapCut-style): trim/stretch the clip boundaries,
+// cut arbitrary ranges, auto-remove silences (from word-level transcript
+// gaps), and undo/redo — all scoped to one highlight at a time.
+// ---------------------------------------------------------------------------
+
+const clipModalOverlay = document.getElementById('clip-modal-overlay');
+const clipModalVideo = document.getElementById('clip-modal-video');
+const clipModalTrack = document.getElementById('clip-modal-track');
+const clipModalRange = document.getElementById('clip-modal-range');
+const clipModalPlayhead = document.getElementById('clip-modal-playhead');
+const clipModalSelection = document.getElementById('clip-modal-selection');
+const clipModalWaveform = document.getElementById('clip-modal-waveform');
+const clipUndoBtn = document.getElementById('clip-undo');
+const clipRedoBtn = document.getElementById('clip-redo');
+const clipCutBtn = document.getElementById('clip-cut-btn');
+const clipSilenceBtn = document.getElementById('clip-silence-btn');
+const clipModalTitleEl = document.getElementById('clip-modal-title');
+const clipModalNumEl = document.getElementById('clip-modal-num');
+const clipTimeStartEl = document.getElementById('clip-modal-time-start');
+const clipTimeEndEl = document.getElementById('clip-modal-time-end');
+const clipModalTimelineEl = document.getElementById('clip-modal-timeline');
+const clipZoomSlider = document.getElementById('clip-zoom-slider');
+const clipZoomLabel = document.getElementById('clip-zoom-label');
+const clipZoomInBtn = document.getElementById('clip-zoom-in');
+const clipZoomOutBtn = document.getElementById('clip-zoom-out');
+const clipZoomFitBtn = document.getElementById('clip-zoom-fit');
+const CLIP_MIN_WINDOW_SPAN = 1; // seconds — how far the modal timeline can zoom in
+
+// clipEditor = { h, state:{start,end,cuts}, winStart, winEnd, history:[], histIdx, pendingSelection }
+let clipEditor = null;
+let clipDragging = null;      // 'start' | 'end' while trimming a boundary
+let clipSelecting = false;    // true while drag-selecting a range to cut
+let clipJustSelected = false; // suppresses the seek-click right after a drag-select
+
+function cloneClipState(s) {
+  return { start: s.start, end: s.end, cuts: s.cuts.map(c => ({ ...c })) };
+}
+
+// Merges overlapping/adjacent cut ranges and clamps them inside [start, end]
+// so cuts stay valid after a trim shrinks the clip.
+function normalizeCuts(cuts, start, end) {
+  const cs = cuts
+    .map(c => ({ start_time: Math.max(start, c.start_time), end_time: Math.min(end, c.end_time) }))
+    .filter(c => c.end_time - c.start_time > 0.05)
+    .sort((a, b) => a.start_time - b.start_time);
+  const merged = [];
+  for (const c of cs) {
+    const last = merged[merged.length - 1];
+    if (last && c.start_time <= last.end_time + 0.05) {
+      last.end_time = Math.max(last.end_time, c.end_time);
+    } else {
+      merged.push({ ...c });
+    }
+  }
+  return merged;
+}
+
+function openClipEditor(h) {
+  const initial = { start: h.start_time, end: h.end_time, cuts: (h.cuts || []).map(c => ({ ...c })) };
+  clipEditor = { h, state: initial, winStart: 0, winEnd: duration, zoom: 1, history: [cloneClipState(initial)], histIdx: 0, pendingSelection: null };
+  clipModalNumEl.textContent = computeNumbering().get(h.id);
+  clipModalTitleEl.textContent = h.title || '(sin título)';
+  clipModalVideo.currentTime = h.start_time;
+  clipModalOverlay.classList.add('open');
+  layoutClipWindow();
+  updateUndoRedoButtons();
+}
+
+function closeClipEditor() {
+  clipModalOverlay.classList.remove('open');
+  clipModalVideo.pause();
+  clipEditor = null;
+}
+
+document.getElementById('clip-modal-close').addEventListener('click', closeClipEditor);
+clipModalOverlay.addEventListener('mousedown', e => { if (e.target === clipModalOverlay) closeClipEditor(); });
+window.addEventListener('keydown', e => {
+  if (!clipEditor) return;
+  if (e.key === 'Escape') { closeClipEditor(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) redoClipEdit(); else undoClipEdit();
+  }
+});
+
+// Local editing window = clip range plus padding on both sides, so the user
+// can drag a trim handle outward to extend ("estirar") the clip beyond its
+// current bounds. Recomputed after every committed trim so it keeps
+// following the clip if the user keeps stretching it further.
+function windowBounds() {
+  const { state } = clipEditor;
+  const span = state.end - state.start;
+  const pad = Math.max(30, span * 0.5);
+  return {
+    winStart: Math.max(0, state.start - pad),
+    winEnd: Math.min(duration, state.end + pad),
+  };
+}
+
+function clipPct(t, winStart, winEnd) {
+  const span = winEnd - winStart;
+  if (span <= 0) return 0;
+  return Math.min(100, Math.max(0, ((t - winStart) / span) * 100));
+}
+
+function clipTimeFromEvent(e) {
+  const rect = clipModalTrack.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const { winStart, winEnd } = clipEditor;
+  return winStart + frac * (winEnd - winStart);
+}
+
+function layoutClipWindow() {
+  if (!clipEditor) return;
+  const { winStart, winEnd } = windowBounds();
+  clipEditor.winStart = winStart;
+  clipEditor.winEnd = winEnd;
+  clipEditor.zoom = 1;
+  clipZoomSlider.value = 0;
+  clipZoomLabel.textContent = '1.0x';
+  renderClipRange();
+  drawClipWaveform();
+}
+
+// Max zoom is relative to the clip's own natural (padded) window, so a short
+// clip and a long clip both bottom out around the same visible span in
+// seconds instead of one letting you zoom in absurdly far.
+function clipMaxZoom() {
+  const nat = windowBounds();
+  const natSpan = nat.winEnd - nat.winStart;
+  return Math.max(1, natSpan / CLIP_MIN_WINDOW_SPAN);
+}
+
+// Shrinks/grows the visible [winStart, winEnd] window around anchorTime
+// (defaults to the current window's center) without touching the clip's own
+// start/end/cuts — mirrors the main timeline's anchor-preserving setZoom.
+function setClipZoom(z, anchorTime) {
+  if (!clipEditor) return;
+  const nat = windowBounds();
+  const natSpan = nat.winEnd - nat.winStart;
+  const maxZoom = clipMaxZoom();
+  const zoom = Math.min(maxZoom, Math.max(1, z));
+  const oldSpan = clipEditor.winEnd - clipEditor.winStart;
+  // Keep anchorTime under the same fractional screen position it was at
+  // before zooming (not just centered), matching the main timeline's feel.
+  const frac = (anchorTime != null && oldSpan > 0)
+    ? Math.min(1, Math.max(0, (anchorTime - clipEditor.winStart) / oldSpan))
+    : 0.5;
+  const center = anchorTime != null ? anchorTime : (clipEditor.winStart + clipEditor.winEnd) / 2;
+  clipEditor.zoom = zoom;
+  const span = zoom <= 1 ? natSpan : Math.max(CLIP_MIN_WINDOW_SPAN, natSpan / zoom);
+  let winStart = center - frac * span;
+  let winEnd = winStart + span;
+  if (winStart < 0) { winEnd -= winStart; winStart = 0; }
+  if (winEnd > duration) { winStart -= (winEnd - duration); winEnd = duration; }
+  clipEditor.winStart = Math.max(0, winStart);
+  clipEditor.winEnd = Math.min(duration, winEnd);
+  clipZoomSlider.value = 100 * Math.log(zoom) / Math.log(Math.max(1.0001, maxZoom));
+  clipZoomLabel.textContent = zoom.toFixed(1) + 'x';
+  renderClipRange();
+  drawClipWaveform();
+}
+
+// Slides the visible window left/right by dxPx screen pixels, used for
+// panning once zoomed in (the fixed-width track can no longer show the
+// whole padded window at once).
+function panClipWindow(dxPx) {
+  if (!clipEditor) return;
+  const { winStart, winEnd } = clipEditor;
+  const span = winEnd - winStart;
+  const pxPerSec = clipModalTrack.clientWidth / span;
+  const dt = dxPx / pxPerSec;
+  let newStart = winStart + dt;
+  let newEnd = winEnd + dt;
+  if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+  if (newEnd > duration) { newStart -= (newEnd - duration); newEnd = duration; }
+  clipEditor.winStart = Math.max(0, newStart);
+  clipEditor.winEnd = Math.min(duration, newEnd);
+  renderClipRange();
+  drawClipWaveform();
+}
+
+clipZoomInBtn.addEventListener('click', () => setClipZoom((clipEditor?.zoom || 1) * 1.5));
+clipZoomOutBtn.addEventListener('click', () => setClipZoom((clipEditor?.zoom || 1) / 1.5));
+clipZoomFitBtn.addEventListener('click', () => layoutClipWindow());
+clipZoomSlider.addEventListener('input', () => {
+  if (!clipEditor) return;
+  const maxZoom = clipMaxZoom();
+  setClipZoom(Math.pow(maxZoom, Number(clipZoomSlider.value) / 100));
+});
+
+// Ctrl/Cmd + scroll zooms anchored at the cursor's time (like the main
+// timeline); plain or shift+scroll pans the window instead.
+clipModalTimelineEl.addEventListener('wheel', e => {
+  if (!clipEditor) return;
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    const t = clipTimeFromEvent(e);
+    setClipZoom(clipEditor.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), t);
+    return;
+  }
+  const dx = e.deltaX !== 0 ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+  if (dx === 0) return;
+  e.preventDefault();
+  panClipWindow(dx);
+}, { passive: false });
+
+function renderClipRange() {
+  const { state, winStart, winEnd } = clipEditor;
+  const left = clipPct(state.start, winStart, winEnd);
+  const right = clipPct(state.end, winStart, winEnd);
+  clipModalRange.style.left = left + '%';
+  clipModalRange.style.width = Math.max(0.5, right - left) + '%';
+  clipTimeStartEl.textContent = fmt(state.start);
+  clipTimeEndEl.textContent = fmt(state.end);
+
+  clipModalRange.querySelectorAll('.handle').forEach(el => el.remove());
+  clipModalTrack.querySelectorAll('.clip-cut').forEach(el => el.remove());
+
+  const leftHandle = document.createElement('div');
+  leftHandle.className = 'handle left';
+  leftHandle.addEventListener('mousedown', e => startClipTrim(e, 'start'));
+  const rightHandle = document.createElement('div');
+  rightHandle.className = 'handle right';
+  rightHandle.addEventListener('mousedown', e => startClipTrim(e, 'end'));
+  clipModalRange.appendChild(leftHandle);
+  clipModalRange.appendChild(rightHandle);
+
+  // Cut markers are positioned against the same winStart/winEnd window (and the
+  // same clipPct()) as the range box and the waveform canvas, instead of being
+  // nested as a % of clipModalRange's own (possibly window-clamped) box. Nesting
+  // them inside the clamped range caused cuts to compress toward the visible edge
+  // whenever state.start/state.end fell outside the zoomed window — the same class
+  // of "two independent rendering paths drift apart" bug as the main timeline had,
+  // just via percentage-clamping instead of scroll/canvas timing.
+  state.cuts.forEach((c, idx) => {
+    const el = document.createElement('div');
+    el.className = 'clip-cut';
+    const cutLeft = clipPct(c.start_time, winStart, winEnd);
+    const cutRight = clipPct(c.end_time, winStart, winEnd);
+    el.style.left = cutLeft + '%';
+    el.style.width = Math.max(0.3, cutRight - cutLeft) + '%';
+    el.title = 'Click para deshacer este corte';
+    el.addEventListener('mousedown', e => e.stopPropagation());
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      state.cuts.splice(idx, 1);
+      commitClipHistory();
+    });
+    clipModalTrack.appendChild(el);
+  });
+}
+
+function drawClipWaveform() {
+  const canvas = clipModalWaveform;
+  const width = canvas.parentElement.clientWidth;
+  const height = canvas.parentElement.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  if (!clipEditor || !waveformPeaks.length || !duration) return;
+
+  const { winStart, winEnd } = clipEditor;
+  const n = waveformPeaks.length;
+  const pointDuration = duration / n;
+  const idxStart = Math.max(0, Math.floor(winStart / pointDuration));
+  const idxEnd = Math.min(n, Math.ceil(winEnd / pointDuration));
+  const pxPerSec = width / Math.max(0.001, winEnd - winStart);
+  const midY = height / 2;
+  const barWidth = Math.max(1, pointDuration * pxPerSec);
+  ctx.fillStyle = 'rgba(230, 232, 235, 0.28)';
+  for (let i = idxStart; i < idxEnd; i++) {
+    const t = i * pointDuration;
+    const x = (t - winStart) * pxPerSec;
+    const h = Math.max(1, waveformPeaks[i] * height * 0.85);
+    ctx.fillRect(x, midY - h / 2, Math.max(1, barWidth - 0.5), h);
+  }
+}
+
+function startClipTrim(e, field) {
+  e.preventDefault();
+  e.stopPropagation();
+  clipDragging = field;
+  window.addEventListener('mousemove', onClipTrimDrag);
+  window.addEventListener('mouseup', endClipTrimDrag);
+}
+
+function onClipTrimDrag(e) {
+  if (!clipEditor || !clipDragging) return;
+  const t = clipTimeFromEvent(e);
+  const { state, winStart, winEnd } = clipEditor;
+  if (clipDragging === 'start') {
+    state.start = Math.max(winStart, Math.min(t, state.end - 1));
+  } else {
+    state.end = Math.min(winEnd, Math.max(t, state.start + 1));
+  }
+  state.cuts = normalizeCuts(state.cuts, state.start, state.end);
+  renderClipRange();
+}
+
+function endClipTrimDrag() {
+  if (!clipDragging) return;
+  clipDragging = null;
+  window.removeEventListener('mousemove', onClipTrimDrag);
+  window.removeEventListener('mouseup', endClipTrimDrag);
+  layoutClipWindow(); // re-center the padded window so the user can keep stretching further
+  commitClipHistory();
+}
+
+// Drag directly on the clip range (not a handle, not an existing cut) marks
+// a pending range to cut. A plain click (no movement) leaves no selection
+// and falls through to the track's click handler, which seeks instead.
+clipModalRange.addEventListener('mousedown', e => {
+  if (e.target !== clipModalRange) return;
+  startClipSelection(e);
+});
+
+function startClipSelection(e) {
+  e.preventDefault();
+  clipSelecting = { anchorTime: clipTimeFromEvent(e) };
+  clipModalSelection.style.display = 'block';
+  updateClipSelectionUI(clipSelecting.anchorTime, clipSelecting.anchorTime);
+  window.addEventListener('mousemove', onClipSelectionDrag);
+  window.addEventListener('mouseup', endClipSelectionDrag);
+}
+
+function onClipSelectionDrag(e) {
+  if (!clipSelecting) return;
+  updateClipSelectionUI(clipSelecting.anchorTime, clipTimeFromEvent(e));
+}
+
+function updateClipSelectionUI(t1, t2) {
+  const { state, winStart, winEnd } = clipEditor;
+  const lo = Math.max(state.start, Math.min(t1, t2));
+  const hi = Math.min(state.end, Math.max(t1, t2));
+  clipEditor.pendingSelection = hi - lo > 0.15 ? { start_time: lo, end_time: hi } : null;
+  const left = clipPct(lo, winStart, winEnd);
+  const right = clipPct(hi, winStart, winEnd);
+  clipModalSelection.style.left = left + '%';
+  clipModalSelection.style.width = Math.max(0.2, right - left) + '%';
+  clipCutBtn.disabled = !clipEditor.pendingSelection;
+}
+
+function endClipSelectionDrag() {
+  clipSelecting = false;
+  window.removeEventListener('mousemove', onClipSelectionDrag);
+  window.removeEventListener('mouseup', endClipSelectionDrag);
+  if (!clipEditor.pendingSelection) {
+    clipModalSelection.style.display = 'none';
+  } else {
+    clipJustSelected = true;
+    setTimeout(() => { clipJustSelected = false; }, 0);
+  }
+}
+
+clipModalTrack.addEventListener('click', e => {
+  if (!clipEditor) return;
+  if (e.target.classList.contains('handle') || e.target.classList.contains('clip-cut')) return;
+  if (clipJustSelected) { clipJustSelected = false; return; }
+  clipModalVideo.currentTime = clipTimeFromEvent(e);
+});
+
+clipCutBtn.addEventListener('click', () => {
+  if (!clipEditor || !clipEditor.pendingSelection) return;
+  const { state } = clipEditor;
+  state.cuts = normalizeCuts([...state.cuts, clipEditor.pendingSelection], state.start, state.end);
+  clipEditor.pendingSelection = null;
+  clipModalSelection.style.display = 'none';
+  clipCutBtn.disabled = true;
+  commitClipHistory();
+});
+
+clipSilenceBtn.addEventListener('click', async () => {
+  if (!clipEditor) return;
+  const { state } = clipEditor;
+  clipSilenceBtn.disabled = true;
+  const original = clipSilenceBtn.textContent;
+  clipSilenceBtn.textContent = 'Buscando silencios…';
+  try {
+    const res = await fetch(`/api/detect_silences?start=${state.start}&end=${state.end}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'error');
+    const gaps = data.gaps || [];
+    if (gaps.length) {
+      state.cuts = normalizeCuts([...state.cuts, ...gaps], state.start, state.end);
+      commitClipHistory();
+    }
+  } catch (err) {
+    console.error('[editor] failed to detect silences', err);
+  } finally {
+    clipSilenceBtn.disabled = false;
+    clipSilenceBtn.textContent = original;
+  }
+});
+
+function commitClipHistory() {
+  if (!clipEditor) return;
+  clipEditor.history = clipEditor.history.slice(0, clipEditor.histIdx + 1);
+  clipEditor.history.push(cloneClipState(clipEditor.state));
+  clipEditor.histIdx++;
+  updateUndoRedoButtons();
+  renderClipRange();
+  saveClipEdits();
+}
+
+function undoClipEdit() {
+  if (!clipEditor || clipEditor.histIdx <= 0) return;
+  clipEditor.histIdx--;
+  clipEditor.state = cloneClipState(clipEditor.history[clipEditor.histIdx]);
+  layoutClipWindow();
+  updateUndoRedoButtons();
+  saveClipEdits();
+}
+
+function redoClipEdit() {
+  if (!clipEditor || clipEditor.histIdx >= clipEditor.history.length - 1) return;
+  clipEditor.histIdx++;
+  clipEditor.state = cloneClipState(clipEditor.history[clipEditor.histIdx]);
+  layoutClipWindow();
+  updateUndoRedoButtons();
+  saveClipEdits();
+}
+
+function updateUndoRedoButtons() {
+  clipUndoBtn.disabled = !clipEditor || clipEditor.histIdx <= 0;
+  clipRedoBtn.disabled = !clipEditor || clipEditor.histIdx >= clipEditor.history.length - 1;
+}
+clipUndoBtn.addEventListener('click', undoClipEdit);
+clipRedoBtn.addEventListener('click', redoClipEdit);
+
+function saveClipEdits() {
+  if (!clipEditor) return;
+  const { h, state } = clipEditor;
+  h.start_time = state.start;
+  h.end_time = state.end;
+  h.cuts = state.cuts.map(c => ({ ...c }));
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ start_time: h.start_time, end_time: h.end_time, cuts: h.cuts }),
+  }).catch(err => console.error('[editor] failed to save clip edits', err));
+  renderMarkers();
+  renderClipsList();
+}
+
+// Skips playback over cut ranges live, so the preview already plays as if
+// the silences/cuts were removed even though nothing is re-encoded yet.
+clipModalVideo.addEventListener('timeupdate', () => {
+  if (!clipEditor) return;
+  const { state } = clipEditor;
+  const t0 = clipModalVideo.currentTime;
+  const activeCut = state.cuts.find(c => t0 >= c.start_time && t0 < c.end_time);
+  if (activeCut) clipModalVideo.currentTime = activeCut.end_time;
+  const t = clipModalVideo.currentTime;
+  if (clipEditor.zoom > 1 && (t < clipEditor.winStart || t > clipEditor.winEnd)) {
+    const span = clipEditor.winEnd - clipEditor.winStart;
+    let newStart = t - span / 2;
+    let newEnd = t + span / 2;
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (newEnd > duration) { newStart -= (newEnd - duration); newEnd = duration; }
+    clipEditor.winStart = Math.max(0, newStart);
+    clipEditor.winEnd = Math.min(duration, newEnd);
+    renderClipRange();
+    drawClipWaveform();
+  }
+  clipModalPlayhead.style.left = clipPct(t, clipEditor.winStart, clipEditor.winEnd) + '%';
+});
 
 loadHighlights();
 loadWaveform();
