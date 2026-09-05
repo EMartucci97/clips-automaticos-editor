@@ -30,6 +30,17 @@ FFMPEG_BIN = _FFMPEG_FULL if os.path.exists(_FFMPEG_FULL) else (shutil.which("ff
 FONTS_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
 FONT_NAME = "Montserrat ExtraBold"
 
+# Per-clip font choice (set via the 'Fuente' control in the standalone editor,
+# static/editor.html, and read back by dashboard.py's regenerate panel). Keyed
+# by a short id instead of storing the raw ASS font name, so a highlight's
+# JSON only ever carries a value from this fixed set and dashboard.py never
+# has to trust free-form text going into the ASS header.
+FONT_CHOICES = {
+    "extrabold": "Montserrat ExtraBold",
+    "black": "Montserrat Black",
+}
+DEFAULT_FONT_KEY = "extrabold"
+
 # ASS colours are &HAABBGGRR (alpha, then BGR — reverse of usual RGB order).
 COLOR_WHITE = "&H00FFFFFF"   # RGB FFFFFF
 COLOR_AMBER = "&H0020B0FF"   # RGB FFB020, matches the reference screenshots
@@ -37,7 +48,9 @@ COLOR_AMBER = "&H0020B0FF"   # RGB FFB020, matches the reference screenshots
 STYLE_ROBERTO = "Word_Roberto"
 STYLE_OTHER = "Word_Other"
 
-ASS_HEADER = f"""[Script Info]
+
+def _ass_header(font_name: str) -> str:
+    return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
@@ -47,8 +60,8 @@ YCbCr Matrix: TV.601
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: {STYLE_ROBERTO},{FONT_NAME},110,{COLOR_WHITE},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,8,0,2,60,60,220,1
-Style: {STYLE_OTHER},{FONT_NAME},110,{COLOR_AMBER},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,8,0,2,60,60,220,1
+Style: {STYLE_ROBERTO},{font_name},110,{COLOR_WHITE},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,8,0,2,60,60,220,1
+Style: {STYLE_OTHER},{font_name},110,{COLOR_AMBER},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,8,0,2,60,60,220,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -67,8 +80,13 @@ def _ass_timestamp(seconds: float) -> str:
 def words_for_window(segments: List[Dict], start_time: float, end_time: float) -> List[Dict]:
     """Collect words falling inside [start_time, end_time], shifted to be
     relative to start_time (0 = first frame of the rendered clip). Carries
-    over the parent segment's `speaker` tag (ROBERTO_LABEL/OTHER_LABEL/None)
-    so build_ass can color each word by who's talking."""
+    over the parent segment's `speaker` tag (ROBERTO_LABEL/OTHER_LABEL/None),
+    unless a manual per-word override (`speaker_override`, see
+    editor_server._apply_transcript_overrides) says otherwise, so build_ass
+    can color each word by who's talking. Also carries each word's own
+    original absolute timestamps (`word_start`/`word_end`, unshifted) so
+    callers can address it back for a manual correction regardless of which
+    window it was fetched through."""
     words: List[Dict] = []
     for seg in segments:
         speaker = seg.get("speaker")
@@ -80,7 +98,9 @@ def words_for_window(segments: List[Dict], start_time: float, end_time: float) -
                 "start": max(0.0, w_start - start_time),
                 "end": max(0.0, min(w_end, end_time) - start_time),
                 "word": w["word"],
-                "speaker": speaker,
+                "speaker": w.get("speaker_override", speaker),
+                "word_start": w_start,
+                "word_end": w_end,
             })
     return words
 
@@ -89,8 +109,8 @@ def _style_for_speaker(speaker: str) -> str:
     return STYLE_OTHER if speaker == OTHER_LABEL else STYLE_ROBERTO
 
 
-def build_ass(words: List[Dict], out_path: str) -> str:
-    lines = [ASS_HEADER]
+def build_ass(words: List[Dict], out_path: str, font_name: str = FONT_NAME) -> str:
+    lines = [_ass_header(font_name)]
     for w in words:
         text = w["word"].replace("\n", " ").strip()
         if not text:
@@ -103,7 +123,7 @@ def build_ass(words: List[Dict], out_path: str) -> str:
     return out_path
 
 
-def burn_subtitles(video_path: str, words: List[Dict], out_path: str) -> str:
+def burn_subtitles(video_path: str, words: List[Dict], out_path: str, font_name: str = FONT_NAME) -> str:
     """Burn word-by-word subtitles onto video_path, writing out_path.
     If there are no words (e.g. silent clip), just copies the source through."""
     if not words:
@@ -114,7 +134,7 @@ def burn_subtitles(video_path: str, words: List[Dict], out_path: str) -> str:
         return out_path
 
     ass_path = out_path + ".ass"
-    build_ass(words, ass_path)
+    build_ass(words, ass_path, font_name=font_name)
     try:
         # ffmpeg filter paths need escaping on all platforms; simplest is to
         # run with cwd set to the .ass file's directory and use a bare filename.

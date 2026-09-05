@@ -16,8 +16,14 @@ from flask import Flask, jsonify, request, send_file
 
 from shorts_generator.config import LOCAL_OUTPUT_DIR
 from shorts_generator.highlights import _parse_json_loose, get_highlights
-from shorts_generator.local.diarizer import _extract_audio_wav, diarize_and_label
+from shorts_generator.local.diarizer import (
+    OTHER_LABEL,
+    ROBERTO_LABEL,
+    _extract_audio_wav,
+    diarize_and_label,
+)
 from shorts_generator.local.llm import call_local_llm
+from shorts_generator.local.subtitles import FONT_CHOICES, words_for_window
 from shorts_generator.local.transcriber import transcribe_local
 
 app = Flask(__name__)
@@ -26,6 +32,7 @@ SOURCE_PATH = None
 NUM_CLIPS = 20
 
 _TRANSCRIPT_CACHE = None
+_DIARIZED_TRANSCRIPT_CACHE = None
 
 SEGMENT_ANALYSIS_PROMPT = """Sos un editor de video que analiza un tramo de transcripción de una entrevista/podcast en español.
 
@@ -168,6 +175,58 @@ def _get_transcript(source_path: str) -> dict:
     if _TRANSCRIPT_CACHE is None:
         _TRANSCRIPT_CACHE = transcribe_local(source_path)
     return _TRANSCRIPT_CACHE
+
+
+def _get_diarized_transcript(source_path: str) -> dict:
+    """Transcript with each segment tagged by speaker (see diarizer.py),
+    loaded once per server run. diarize_and_label's own diarization pass is
+    disk-cached (.diar.json), so this is cheap even on first call here."""
+    global _DIARIZED_TRANSCRIPT_CACHE
+    if _DIARIZED_TRANSCRIPT_CACHE is None:
+        _DIARIZED_TRANSCRIPT_CACHE = diarize_and_label(source_path, _get_transcript(source_path))
+        _apply_transcript_overrides(_DIARIZED_TRANSCRIPT_CACHE, _load_overrides(source_path))
+    return _DIARIZED_TRANSCRIPT_CACHE
+
+
+def _overrides_cache_path(source_path: str) -> Path:
+    stem = Path(source_path).stem
+    return Path(LOCAL_OUTPUT_DIR) / f"{stem}.transcript_overrides.json"
+
+
+def _load_overrides(source_path: str) -> dict:
+    cache_path = _overrides_cache_path(source_path)
+    if cache_path.exists():
+        with open(cache_path) as f:
+            return json.load(f)
+    return {"words": {}}
+
+
+def _save_overrides(source_path: str, overrides: dict) -> None:
+    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+    with open(_overrides_cache_path(source_path), "w") as f:
+        json.dump(overrides, f, indent=2, ensure_ascii=False)
+
+
+def _word_key(start: float, end: float) -> str:
+    return f"{round(float(start), 3)}:{round(float(end), 3)}"
+
+
+def _apply_transcript_overrides(transcript: dict, overrides: dict) -> None:
+    """Patch manual corrections (text and/or speaker) onto the matching
+    words in-place, keyed by each word's own original absolute timestamps
+    so overrides survive regardless of segment/word indexing."""
+    words_overrides = overrides.get("words") or {}
+    if not words_overrides:
+        return
+    for seg in transcript.get("segments", []):
+        for w in seg.get("words", []) or []:
+            entry = words_overrides.get(_word_key(w["start"], w["end"]))
+            if not entry:
+                continue
+            if "text" in entry:
+                w["word"] = entry["text"]
+            if "speaker" in entry:
+                w["speaker_override"] = entry["speaker"]
 
 
 def _transcript_text_for_range(transcript: dict, start: float, end: float) -> str:
@@ -321,6 +380,48 @@ def api_transcript_range():
     transcript = _get_transcript(SOURCE_PATH)
     text = _transcript_text_for_range(transcript, start, end)
     return jsonify({"text": text})
+
+
+@app.route("/api/captions_range", methods=["GET"])
+def api_captions_range():
+    try:
+        start = float(request.args.get("start", 0))
+        end = float(request.args.get("end", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid start/end"}), 400
+
+    transcript = _get_diarized_transcript(SOURCE_PATH)
+    words = words_for_window(transcript.get("segments", []), start, end)
+    return jsonify({"words": words})
+
+
+@app.route("/api/word_override", methods=["POST"])
+def api_word_override():
+    body = request.get_json(force=True) or {}
+    try:
+        word_start = float(body.get("word_start"))
+        word_end = float(body.get("word_end"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "word_start/word_end required"}), 400
+
+    text = body.get("text")
+    speaker = body.get("speaker")
+    if speaker is not None and speaker not in (ROBERTO_LABEL, OTHER_LABEL):
+        return jsonify({"error": "invalid speaker"}), 400
+    if text is None and speaker is None:
+        return jsonify({"error": "text or speaker required"}), 400
+
+    overrides = _load_overrides(SOURCE_PATH)
+    entry = overrides.setdefault("words", {}).setdefault(_word_key(word_start, word_end), {})
+    if text is not None:
+        entry["text"] = str(text)
+    if speaker is not None:
+        entry["speaker"] = speaker
+    _save_overrides(SOURCE_PATH, overrides)
+
+    transcript = _get_diarized_transcript(SOURCE_PATH)
+    _apply_transcript_overrides(transcript, overrides)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/analyze_segment", methods=["POST"])
@@ -526,13 +627,35 @@ def api_patch_highlight(highlight_id):
     if "transcript_override" in body:
         match["transcript_override"] = str(body["transcript_override"])
     if "color" in body:
-        match["color"] = str(body["color"])
+        if body["color"]:
+            match["color"] = str(body["color"])
+        else:
+            match.pop("color", None)
     if "captions_enabled" in body:
         match["captions_enabled"] = bool(body["captions_enabled"])
+    if "speed" in body:
+        match["speed"] = float(body["speed"])
+    if "font" in body:
+        font_key = str(body["font"])
+        if font_key not in FONT_CHOICES:
+            return jsonify({"error": f"unknown font '{font_key}'"}), 400
+        match["font"] = font_key
     if "cuts" in body:
         match["cuts"] = [
             {"start_time": float(c["start_time"]), "end_time": float(c["end_time"])}
             for c in body["cuts"]
+        ]
+    if "crop_enabled" in body:
+        match["crop_enabled"] = bool(body["crop_enabled"])
+    if "crop_keyframes" in body:
+        match["crop_keyframes"] = [
+            {
+                "t": float(k["t"]),
+                "cx": float(k["cx"]),
+                "cy": float(k["cy"]),
+                "zoom": float(k["zoom"]),
+            }
+            for k in body["crop_keyframes"]
         ]
 
     with open(cache_path, "w") as f:

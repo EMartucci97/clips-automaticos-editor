@@ -237,6 +237,45 @@ def _load_captions_preference(source: str, start: float, end: float) -> bool:
     return True
 
 
+def _load_speed_preference(source: str, start: float, end: float) -> float:
+    """Per-highlight playback speed set via the 'Velocidad' control in the
+    standalone editor (editor_server.py, static/editor.html), same lookup
+    pattern as _load_captions_preference above. Defaults to 1.0x."""
+    if not source:
+        return 1.0
+    stem = os.path.splitext(os.path.basename(source))[0]
+    cache_path = os.path.join(LOCAL_OUTPUT_DIR, f"{stem}.editor_highlights.json")
+    try:
+        with open(cache_path) as f:
+            highlights = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 1.0
+    for h in highlights:
+        if abs(h.get("start_time", -1e9) - start) < 1.0 and abs(h.get("end_time", -1e9) - end) < 1.0:
+            return float(h.get("speed", 1.0))
+    return 1.0
+
+
+def _load_font_preference(source: str, start: float, end: float) -> str:
+    """Per-highlight subtitle font choice set via the 'Fuente' control in the
+    standalone editor, same lookup pattern as _load_captions_preference above.
+    Defaults to subtitles.DEFAULT_FONT_KEY."""
+    if not source:
+        return subtitles.DEFAULT_FONT_KEY
+    stem = os.path.splitext(os.path.basename(source))[0]
+    cache_path = os.path.join(LOCAL_OUTPUT_DIR, f"{stem}.editor_highlights.json")
+    try:
+        with open(cache_path) as f:
+            highlights = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return subtitles.DEFAULT_FONT_KEY
+    for h in highlights:
+        if abs(h.get("start_time", -1e9) - start) < 1.0 and abs(h.get("end_time", -1e9) - end) < 1.0:
+            key = h.get("font", subtitles.DEFAULT_FONT_KEY)
+            return key if key in subtitles.FONT_CHOICES else subtitles.DEFAULT_FONT_KEY
+    return subtitles.DEFAULT_FONT_KEY
+
+
 def _load_clip_metadata(clip_path: str):
     try:
         with open(_metadata_path(clip_path)) as f:
@@ -429,6 +468,26 @@ if job:
         captions_default = _load_captions_preference(job["source"], job["start"], job["end"])
         burn_subs = st.checkbox("Quemar subtítulos", value=captions_default, key=f"burn_subs_{job_key}")
 
+        speed_default = _load_speed_preference(job["source"], job["start"], job["end"])
+        speed_options = [1.0, 1.1, 1.2, 1.3]
+        speed = st.select_slider(
+            "Velocidad (mantiene el tono de voz)",
+            options=speed_options,
+            value=speed_default if speed_default in speed_options else 1.0,
+            format_func=lambda v: f"{v}x",
+            key=f"speed_{job_key}",
+        )
+
+        font_default = _load_font_preference(job["source"], job["start"], job["end"])
+        font_key = st.radio(
+            "Fuente de los subtítulos",
+            list(subtitles.FONT_CHOICES.keys()),
+            index=list(subtitles.FONT_CHOICES.keys()).index(font_default),
+            format_func=lambda k: subtitles.FONT_CHOICES[k],
+            horizontal=True,
+            key=f"font_{job_key}",
+        )
+
         split_screen = st.checkbox(
             "Split screen (arriba/abajo)", value=False, key=f"split_{job['filename']}",
         )
@@ -504,8 +563,15 @@ if job:
                     transcript = transcriber.transcribe_local(job["source"])
                     words = subtitles.words_for_window(transcript["segments"], job["start"], job["end"])
                     tmp_subbed = out_path + ".subbed.mp4"
-                    subtitles.burn_subtitles(out_path, words, tmp_subbed)
+                    subtitles.burn_subtitles(
+                        out_path, words, tmp_subbed,
+                        font_name=subtitles.FONT_CHOICES[font_key],
+                    )
                     os.replace(tmp_subbed, out_path)
+                if speed != 1.0:
+                    tmp_sped = out_path + ".sped.mp4"
+                    clipper.apply_speed_local(out_path, speed, tmp_sped)
+                    os.replace(tmp_sped, out_path)
                 _save_clip_metadata(out_path, job["source"], job["start"], job["end"])
                 st.session_state.regenerated_path = out_path
             st.success(f"Listo: {out_path}")

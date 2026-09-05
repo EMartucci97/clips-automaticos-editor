@@ -51,6 +51,29 @@ def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> s
     return out_path
 
 
+def apply_speed_local(in_path: str, speed: float, out_path: str) -> str:
+    """Re-encodes in_path at `speed`x using ffmpeg's time-stretch filters
+    (setpts for video, atempo for audio) instead of changing the sample
+    rate, so voice pitch is preserved — no "chipmunk" effect. `atempo`
+    supports 0.5-100.0 in one pass, comfortably covering the 1.0-1.3x range
+    the editor exposes, so no filter chaining is needed."""
+    if speed == 1.0:
+        if os.path.abspath(in_path) != os.path.abspath(out_path):
+            os.replace(in_path, out_path)
+        return out_path
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-filter_complex", f"[0:v]setpts=PTS/{speed}[v];[0:a]atempo={speed}[a]",
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
 def _active_speaker_centers(in_path: str, shot_overrides: Optional[Dict[int, int]] = None):
     """Try the mouth-motion + audio active-speaker tracker. Returns None
     (falling back to naive largest-face tracking) if mediapipe isn't

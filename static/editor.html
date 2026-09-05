@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>Editor de clips</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Montserrat:wght@800;900&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: dark;
@@ -86,11 +86,8 @@
     font-family: 'Inter', sans-serif;
   }
   #timeline-toolbar button:hover { background: var(--row-hover); border-color: var(--accent-line); }
-  #zoom-fit { width: auto; padding: 0 9px; font-size: 11px; }
   #zoom-slider { width: 140px; accent-color: var(--accent); }
   #zoom-label { min-width: 42px; }
-  #isolate-btn { width: auto; padding: 0 9px; font-size: 11px; font-family: 'Inter', sans-serif; }
-  #isolate-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
   #zoom-hint { margin-left: auto; }
 
   #timeline-ruler {
@@ -373,7 +370,10 @@
     display: flex;
     flex-direction: column;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    transition: width .15s ease, height .15s ease;
   }
+  #clip-modal.maximized { width: 97vw; height: 95vh; max-height: 95vh; }
+  #clip-modal.maximized #clip-modal-video { max-height: 62vh; }
   #clip-modal-header {
     display: flex;
     align-items: center;
@@ -407,9 +407,139 @@
     padding: 0 4px;
   }
   #clip-modal-close:hover { color: var(--text); }
+  #clip-modal-maximize {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 15px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0 4px;
+    margin-right: 2px;
+  }
+  #clip-modal-maximize:hover { color: var(--text); }
+  #clip-modal-maximize.active { color: var(--accent); }
   #clip-modal-body { display: flex; min-height: 0; overflow: hidden; }
   #clip-modal-video-col { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
-  #clip-modal-video { width: 100%; max-height: 40vh; background: #000; display: block; }
+  #clip-modal-video-row { display: flex; gap: 10px; align-items: flex-start; }
+  #clip-modal-video-wrap { position: relative; flex: 1; min-width: 0; }
+  #clip-modal-video { width: 100%; max-height: 40vh; background: #000; display: block; cursor: pointer; }
+  #clip-modal-crop-preview-wrap {
+    position: relative;
+    flex-shrink: 0;
+    width: 110px;
+    aspect-ratio: 9/16;
+    max-height: 40vh;
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    display: none;
+  }
+  #clip-modal-crop-preview-wrap.visible { display: block; }
+  #clip-modal-crop-canvas { width: 100%; height: 100%; display: block; }
+  #clip-modal-crop-preview-label {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 2px 6px;
+    border-radius: 999px;
+  }
+  #clip-modal-crop-box {
+    position: absolute;
+    display: none;
+    border: 2px solid var(--accent-line, #FFB020);
+    background: rgba(255, 176, 32, 0.12);
+    cursor: move;
+    box-sizing: border-box;
+  }
+  #clip-modal-crop-box.visible { display: block; }
+  #clip-modal-crop-box .crop-handle {
+    position: absolute;
+    right: -5px;
+    bottom: -5px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent-line, #FFB020);
+    border: 1px solid #000;
+    cursor: nwse-resize;
+  }
+  #clip-modal-crop-panel { margin-top: 4px; }
+  #clip-modal-crop-zoom-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    padding: 5px 0;
+  }
+  #clip-modal-crop-zoom-row .tool-label { flex-shrink: 0; }
+  #clip-modal-crop-zoom-row input[type="range"] { flex: 1; }
+  #clip-modal-crop-kf-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0 8px;
+  }
+  #clip-crop-kf-count { font-size: 11px; color: var(--text-faint); margin-left: auto; }
+  .tool-hint {
+    font-size: 10.5px;
+    color: var(--text-faint);
+    opacity: .8;
+    line-height: 1.4;
+  }
+  #clip-modal-playbar {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-radius: 20px;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(4px);
+  }
+  #clip-modal-playpause {
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent-line, #FFB020);
+    color: #000;
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #clip-modal-playtime {
+    font-size: 12px;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  #clip-modal-captions-overlay {
+    position: absolute;
+    left: 8%;
+    right: 8%;
+    bottom: 8%;
+    display: none;
+    text-align: center;
+    pointer-events: none;
+    font-family: 'Montserrat', 'Inter', sans-serif;
+    font-weight: 800;
+    font-size: clamp(16px, 3vw, 26px);
+    line-height: 1.3;
+    color: #fff;
+    text-shadow: 0 0 6px rgba(0,0,0,.85), 0 0 2px rgba(0,0,0,.9);
+  }
+  #clip-modal-captions-overlay.visible { display: block; }
   #clip-modal-toolbar {
     display: flex;
     align-items: center;
@@ -434,7 +564,6 @@
   #clip-modal-toolbar button:hover:not(:disabled) { background: var(--row-hover); border-color: var(--accent-line); }
   #clip-modal-toolbar button:disabled { color: var(--text-faint); cursor: not-allowed; opacity: .5; }
   #clip-modal-toolbar .sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
-  #clip-modal-hint { margin-left: auto; font-size: 11px; }
   #clip-modal-zoombar {
     display: flex;
     align-items: center;
@@ -457,17 +586,32 @@
     font-family: 'Inter', sans-serif;
   }
   #clip-modal-zoombar button:hover { background: var(--row-hover); }
-  #clip-zoom-fit { width: auto; padding: 0 9px; font-size: 11px; font-family: 'Inter', sans-serif; }
   #clip-zoom-slider { width: 120px; accent-color: var(--accent); }
   #clip-zoom-label { min-width: 42px; }
-  #clip-zoom-hint { margin-left: auto; font-size: 11px; }
+  #clip-modal-ruler {
+    position: relative;
+    height: 16px;
+    margin: 14px 16px 0;
+    background: var(--bg);
+    border: 1px solid var(--border-soft);
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    overflow: hidden;
+  }
+  #clip-modal-ruler-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
   #clip-modal-timeline {
     position: relative;
     height: 64px;
-    margin: 14px 16px 4px;
+    margin: 0 16px 4px;
     background: var(--bg);
     border: 1px solid var(--border-soft);
-    border-radius: 8px;
+    border-radius: 0 0 8px 8px;
     overflow: hidden;
   }
   #clip-modal-waveform { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -486,8 +630,29 @@
     bottom: 0;
     width: 2px;
     background: #ff5470;
-    pointer-events: none;
     z-index: 5;
+    cursor: ew-resize;
+  }
+  #clip-modal-playhead::before {
+    /* Invisible wider hit-area so the thin line is easy to grab. */
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -5px;
+    width: 12px;
+  }
+  #clip-modal-playhead::after {
+    /* Small tab at the top, like CapCut's playhead handle. */
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 10px;
+    height: 8px;
+    background: #ff5470;
+    border-radius: 0 0 3px 3px;
   }
   #clip-modal-selection {
     position: absolute;
@@ -519,6 +684,106 @@
   }
 
   /* Tools sidebar (design preview — most tools have no backend yet) */
+  #clip-modal-resize-handle {
+    height: 9px;
+    margin: 2px 16px 0;
+    cursor: row-resize;
+    position: relative;
+  }
+  #clip-modal-resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 32px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  #clip-modal-resize-handle:hover::after,
+  #clip-modal-resize-handle.dragging::after { background: var(--accent-line); }
+  #clip-modal-transcript-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--text-faint);
+    font-weight: 600;
+    padding: 6px 16px 6px;
+  }
+  #clip-modal-transcript-hint {
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+    font-size: 10.5px;
+    color: var(--text-faint);
+    opacity: .7;
+  }
+  #clip-transcript-selbar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    margin: 0 16px 8px;
+    padding: 6px 10px;
+    border-radius: 7px;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+  #clip-transcript-selbar.visible { display: flex; }
+  #clip-transcript-selbar-label { color: var(--muted); margin-right: auto; }
+  #clip-transcript-selbar button {
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+  }
+  #clip-transcript-selbar button:hover { background: var(--row-hover); border-color: var(--accent-line); }
+  #clip-modal-transcript {
+    padding: 0 16px 16px;
+    font-size: 13.5px;
+    line-height: 1.85;
+    color: var(--text-faint);
+    flex: 1 1 auto;
+    min-height: 80px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overflow-wrap: break-word;
+    user-select: none;
+  }
+  #clip-modal-transcript .word {
+    cursor: pointer;
+    border-radius: 3px;
+    padding: 1px 1px;
+  }
+  #clip-modal-transcript .word:hover { background: var(--row-hover); }
+  #clip-modal-transcript .word.other { color: #FFB020; }
+  #clip-modal-transcript .word.roberto { color: var(--text); }
+  #clip-modal-transcript .word.active { background: var(--accent-dim); color: var(--accent); }
+  #clip-modal-transcript .word.selected { background: var(--accent-dim); }
+  #clip-modal-transcript .word.empty {
+    display: inline-block;
+    min-width: 1.4em;
+    min-height: 1em;
+    border: 1px dashed var(--accent-line);
+    vertical-align: middle;
+  }
+  #clip-modal-transcript .word-edit {
+    font: inherit;
+    color: inherit;
+    background: var(--bg);
+    border: 1px solid var(--accent-line);
+    border-radius: 3px;
+    padding: 0 2px;
+    width: 6ch;
+  }
   #clip-modal-tools-col {
     width: 300px;
     flex-shrink: 0;
@@ -558,6 +823,19 @@
     padding: 2px 7px;
   }
   .tool-row.disabled .tool-label { color: var(--text-faint); }
+  .tool-btn {
+    font-size: 11.5px;
+    padding: 5px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text);
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    flex-shrink: 0;
+  }
+  .tool-btn:hover:not(:disabled) { background: var(--row-hover); border-color: var(--accent-line); }
+  .tool-btn:disabled { color: var(--text-faint); cursor: not-allowed; opacity: .5; }
   .style-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .style-chip {
     font-size: 11.5px;
@@ -571,7 +849,7 @@
   .switch {
     width: 32px; height: 18px; border-radius: 999px;
     background: var(--panel-alt); border: 1px solid var(--border);
-    position: relative; flex-shrink: 0;
+    position: relative; flex-shrink: 0; cursor: pointer;
   }
   .switch::after {
     content: ''; position: absolute; top: 1px; left: 1px;
@@ -613,8 +891,6 @@
     <input type="range" id="zoom-slider" min="0" max="100" value="0" step="1">
     <button id="zoom-in" title="Acercar">+</button>
     <span id="zoom-label">1.0x</span>
-    <button id="zoom-fit" title="Ver todo el video">Ver todo</button>
-    <button id="isolate-btn" title="Mostrar todos los clips del mismo color, numerados">Aislar</button>
     <span id="zoom-hint">Ctrl/Cmd + scroll sobre el timeline para hacer zoom</span>
   </div>
   <div id="timeline-ruler">
@@ -646,30 +922,46 @@
 <div id="clip-modal-overlay">
   <div id="clip-modal">
     <div id="clip-modal-header">
+      <button id="clip-modal-close" title="Cerrar">&times;</button>
       <div id="clip-modal-title-wrap">
         <span id="clip-modal-num"></span>
         <span id="clip-modal-title"></span>
       </div>
-      <button id="clip-modal-close" title="Cerrar">&times;</button>
+      <button id="clip-modal-maximize" title="Agrandar">&#9974;</button>
     </div>
     <div id="clip-modal-body">
     <div id="clip-modal-video-col">
-    <video id="clip-modal-video" src="/video" controls preload="metadata"></video>
+    <div id="clip-modal-video-row">
+    <div id="clip-modal-video-wrap">
+      <video id="clip-modal-video" src="/video" preload="metadata"></video>
+      <div id="clip-modal-captions-overlay"></div>
+      <div id="clip-modal-crop-box">
+        <div class="crop-handle"></div>
+      </div>
+      <div id="clip-modal-playbar">
+        <button type="button" id="clip-modal-playpause" title="Reproducir/Pausar">&#9654;</button>
+        <span id="clip-modal-playtime">0:00 / 0:00</span>
+      </div>
+    </div>
+    <div id="clip-modal-crop-preview-wrap">
+      <canvas id="clip-modal-crop-canvas"></canvas>
+      <span id="clip-modal-crop-preview-label">Vertical</span>
+    </div>
+    </div>
     <div id="clip-modal-toolbar">
       <button id="clip-undo" title="Deshacer (Ctrl+Z)">&#8630;</button>
       <button id="clip-redo" title="Rehacer (Ctrl+Shift+Z)">&#8631;</button>
       <span class="sep"></span>
       <button id="clip-cut-btn" title="Cortar el tramo marcado" disabled>Cortar selección</button>
-      <button id="clip-silence-btn" title="Detectar y quitar pausas automáticamente">Quitar silencios</button>
-      <span id="clip-modal-hint">Arrastrá sobre el clip para marcar un tramo a cortar</span>
     </div>
     <div id="clip-modal-zoombar">
       <button id="clip-zoom-out" title="Alejar">&minus;</button>
       <input type="range" id="clip-zoom-slider" min="0" max="100" value="0" step="1">
       <button id="clip-zoom-in" title="Acercar">+</button>
       <span id="clip-zoom-label">1.0x</span>
-      <button id="clip-zoom-fit" title="Ver todo el clip">Ver clip</button>
-      <span id="clip-zoom-hint">Ctrl/Cmd + scroll sobre la línea para hacer zoom</span>
+    </div>
+    <div id="clip-modal-ruler">
+      <canvas id="clip-modal-ruler-canvas"></canvas>
     </div>
     <div id="clip-modal-timeline">
       <canvas id="clip-modal-waveform"></canvas>
@@ -683,10 +975,26 @@
       <span id="clip-modal-time-start"></span>
       <span id="clip-modal-time-end"></span>
     </div>
+    <div id="clip-modal-resize-handle" title="Arrastrá para agrandar/achicar"></div>
+    <div id="clip-modal-transcript-head">
+      Transcripción
+      <span id="clip-modal-transcript-hint">Doble clic en una palabra para editarla · Shift+clic para seleccionar un tramo y reasignar quién habla</span>
+    </div>
+    <div id="clip-transcript-selbar">
+      <span id="clip-transcript-selbar-label"></span>
+      <button type="button" data-speaker="ROBERTO">Roberto</button>
+      <button type="button" data-speaker="OTHER">Otro</button>
+      <button type="button" id="clip-transcript-selbar-cancel">Cancelar</button>
+    </div>
+    <div id="clip-modal-transcript"></div>
     </div>
     <div id="clip-modal-tools-col">
       <div class="tool-section">
         <div class="tool-head">Limpieza</div>
+        <div class="tool-row">
+          <span class="tool-label">Quitar silencios</span>
+          <button id="clip-silence-btn" class="tool-btn" title="Detectar y quitar pausas automáticamente">Aplicar</button>
+        </div>
         <div class="tool-row disabled">
           <span class="tool-label">Quitar muletillas</span>
           <span class="tool-tag">Próximamente</span>
@@ -697,11 +1005,34 @@
         <div class="tool-row">
           <span class="tool-label">Estilo actual: palabra por palabra, color por speaker</span>
         </div>
+        <div class="tool-row">
+          <span class="tool-label">Subtítulos</span>
+          <div class="switch" id="clip-modal-captions-switch" title="Subtítulos quemados al exportar este clip (blanco/ámbar por hablante)"></div>
+        </div>
         <div class="style-grid">
           <span class="style-chip active" title="Estilo real, usado al generar el corto">Karaoke</span>
           <span class="style-chip" title="Próximamente">Bold</span>
           <span class="style-chip" title="Próximamente">Minimal</span>
           <span class="style-chip" title="Próximamente">Highlight</span>
+        </div>
+        <div class="tool-row">
+          <span class="tool-label">Fuente</span>
+        </div>
+        <div class="style-grid" id="clip-modal-font-grid">
+          <span class="style-chip active" data-font="extrabold">ExtraBold</span>
+          <span class="style-chip" data-font="black">Black</span>
+        </div>
+      </div>
+      <div class="tool-section">
+        <div class="tool-head">Velocidad</div>
+        <div class="tool-row">
+          <span class="tool-label">Reproducción (mantiene el tono de voz)</span>
+        </div>
+        <div class="style-grid" id="clip-modal-speed-grid">
+          <span class="style-chip active" data-speed="1.0">1.0x</span>
+          <span class="style-chip" data-speed="1.1">1.1x</span>
+          <span class="style-chip" data-speed="1.2">1.2x</span>
+          <span class="style-chip" data-speed="1.3">1.3x</span>
         </div>
       </div>
       <div class="tool-section">
@@ -717,9 +1048,21 @@
       </div>
       <div class="tool-section">
         <div class="tool-head">Encuadre</div>
-        <div class="tool-row disabled">
-          <span class="tool-label">Seguimiento de rostro</span>
-          <span class="tool-tag">Próximamente</span>
+        <div class="tool-row">
+          <span class="tool-label">Recorte vertical (9:16)</span>
+          <div class="switch" id="clip-modal-crop-switch" title="Mostrar el recuadro de recorte y el preview vertical"></div>
+        </div>
+        <div id="clip-modal-crop-panel" style="display:none">
+          <div id="clip-modal-crop-zoom-row">
+            <span class="tool-label">Zoom</span>
+            <input type="range" id="clip-crop-zoom-slider" min="1" max="4" step="0.1" value="1">
+          </div>
+          <div id="clip-modal-crop-kf-row">
+            <button type="button" id="clip-crop-add-kf" title="Agregar un punto clave en el momento actual">+ Punto clave</button>
+            <button type="button" id="clip-crop-del-kf" title="Eliminar el punto clave más cercano" disabled>Eliminar</button>
+            <span id="clip-crop-kf-count"></span>
+          </div>
+          <div class="tool-hint">Arrastrá el recuadro sobre el video para mover el encuadre en el momento actual. Movete a otro punto del clip y agregá otro punto clave para que la cámara siga a quien habla.</div>
         </div>
       </div>
       <div class="tool-section">
@@ -742,7 +1085,6 @@ const zoomSlider = document.getElementById('zoom-slider');
 const zoomLabel = document.getElementById('zoom-label');
 const zoomInBtn = document.getElementById('zoom-in');
 const zoomOutBtn = document.getElementById('zoom-out');
-const zoomFitBtn = document.getElementById('zoom-fit');
 const statusEl = document.getElementById('status');
 const detailEl = document.getElementById('detail');
 const labelStart = document.getElementById('label-start');
@@ -774,12 +1116,7 @@ function setScrollLeft(x) {
   drawRuler();
 }
 
-const COLORS = ['#4f8cff', '#ff9f43', '#2ecc71', '#e84393', '#00cec9', '#fdcb6e', '#a29bfe', '#ff7675'];
-const ISOLATE_COLOR = '#123a6e';
-const ISOLATE_STORAGE_KEY = 'editor.isolateMode';
-// Persisted so the toggle survives a page reload instead of silently
-// resetting to the rainbow palette every time.
-let isolateMode = localStorage.getItem(ISOLATE_STORAGE_KEY) === '1';
+const DEFAULT_COLOR = '#123a6e';
 
 function fmt(sec) {
   sec = Math.max(0, Math.floor(sec));
@@ -789,20 +1126,109 @@ function fmt(sec) {
   return `${h}:${m}:${s}`;
 }
 
+// Short m:ss form used for the clip-relative playbar readout (as opposed to
+// fmt() above, which is the absolute HH:MM:SS used against the source video).
+function fmtShort(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60);
+  const s = String(sec % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
 function pct(t) {
   if (!duration) return 0;
   return Math.min(100, Math.max(0, (t / duration) * 100));
 }
 
 function colorFor(h) {
-  return h.color || COLORS[h.id % COLORS.length];
+  return h.color || DEFAULT_COLOR;
 }
 
-// In isolate mode every marker shares one dark-blue color regardless of its
-// own custom color or palette slot — colorFor(h) still holds the real
-// underlying color so it survives turning isolate mode back off.
-function displayColorFor(h) {
-  return isolateMode ? ISOLATE_COLOR : colorFor(h);
+// Shared by the "Subtítulos" toggle in the highlight detail panel and the
+// "Quemar subtítulos" switch inside the clip-editor modal — both control the
+// same per-highlight `captions_enabled` preference, saved via PATCH and read
+// back by dashboard.py at export time.
+function setCaptionsEnabled(h, enabled) {
+  h.captions_enabled = enabled;
+  const panelBtn = document.getElementById('captions-toggle-btn');
+  if (panelBtn && selectedId === h.id) {
+    panelBtn.classList.toggle('active', enabled);
+    panelBtn.textContent = enabled ? 'Subtítulos ✓' : 'Subtítulos ✕';
+  }
+  const modalSwitch = document.getElementById('clip-modal-captions-switch');
+  if (modalSwitch && clipEditor && clipEditor.h === h) {
+    modalSwitch.classList.toggle('on', enabled);
+    if (!enabled) {
+      const overlay = document.getElementById('clip-modal-captions-overlay');
+      if (overlay) overlay.classList.remove('visible');
+    } else {
+      updateClipCaptionsOverlay();
+    }
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ captions_enabled: enabled }),
+  }).catch(err => console.error('[editor] failed to save captions_enabled', err));
+}
+
+// Sets h.speed and, if this clip is open in the modal, the video's
+// playbackRate — browsers keep pitch constant on playbackRate changes by
+// default (preservesPitch), so this speeds up playback without the
+// "chipmunk" voice effect.
+function setSpeed(h, speed) {
+  h.speed = speed;
+  if (clipEditor && clipEditor.h === h) {
+    const grid = document.getElementById('clip-modal-speed-grid');
+    if (grid) {
+      grid.querySelectorAll('.style-chip').forEach(chip => {
+        chip.classList.toggle('active', parseFloat(chip.dataset.speed) === speed);
+      });
+    }
+    applyClipPlaybackRate();
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ speed }),
+  }).catch(err => console.error('[editor] failed to save speed', err));
+}
+
+// The real font family used at export lives in shorts_generator/local/
+// subtitles.py's FONT_CHOICES (ASS Fontname baked into the burned-in
+// subtitles); this map only mirrors it for the live preview overlay, keyed
+// by the same short id so the two stay in lockstep.
+const CLIP_FONT_PREVIEW = {
+  extrabold: { family: "'Montserrat', 'Inter', sans-serif", weight: 800 },
+  black: { family: "'Montserrat', 'Inter', sans-serif", weight: 900 },
+};
+
+function setFont(h, fontKey) {
+  h.font = fontKey;
+  if (clipEditor && clipEditor.h === h) {
+    const grid = document.getElementById('clip-modal-font-grid');
+    if (grid) {
+      grid.querySelectorAll('.style-chip').forEach(chip => {
+        chip.classList.toggle('active', chip.dataset.font === fontKey);
+      });
+    }
+    applyClipCaptionFont();
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ font: fontKey }),
+  }).catch(err => console.error('[editor] failed to save font', err));
+}
+
+// Applies clipEditor.h.font to the live word-by-word captions overlay, so
+// switching fonts is visible in the preview without waiting for a real export.
+function applyClipCaptionFont() {
+  if (!clipEditor) return;
+  const key = clipEditor.h.font || 'extrabold';
+  const preview = CLIP_FONT_PREVIEW[key] || CLIP_FONT_PREVIEW.extrabold;
+  clipModalCaptionsOverlay.style.fontFamily = preview.family;
+  clipModalCaptionsOverlay.style.fontWeight = preview.weight;
 }
 
 function renderSubmarkers() {
@@ -861,7 +1287,7 @@ function renderClipsList() {
     const row = document.createElement('div');
     row.className = 'clip-row' + (h.id === selectedId ? ' selected' : '');
     row.innerHTML = `
-      <span class="clip-num" style="--marker-color:${displayColorFor(h)}">${numberOf.get(h.id)}</span>
+      <span class="clip-num" style="--marker-color:${colorFor(h)}">${numberOf.get(h.id)}</span>
       <span class="clip-title">${escapeHtml(h.title || '(sin título)')}</span>
       <span class="clip-dur">${fmtDuration(h.end_time - h.start_time)}</span>
     `;
@@ -877,18 +1303,16 @@ function renderMarkers() {
   highlights.forEach(h => {
     const el = document.createElement('div');
     el.className = 'marker' + (h.id === selectedId ? ' selected' : '');
-    el.style.setProperty('--marker-color', displayColorFor(h));
+    el.style.setProperty('--marker-color', colorFor(h));
     el.style.left = pct(h.start_time) + '%';
     el.style.width = Math.max(0.2, pct(h.end_time) - pct(h.start_time)) + '%';
     el.title = (h.sales_angle || 'sin ángulo') + ' — ' + (h.title || '');
     el.dataset.id = h.id;
 
-    if (isolateMode) {
-      const numEl = document.createElement('span');
-      numEl.className = 'marker-number';
-      numEl.textContent = String(numberOf.get(h.id));
-      el.appendChild(numEl);
-    }
+    const numEl = document.createElement('span');
+    numEl.className = 'marker-number';
+    numEl.textContent = String(numberOf.get(h.id));
+    el.appendChild(numEl);
 
     const left = document.createElement('div');
     left.className = 'handle left';
@@ -926,9 +1350,9 @@ function selectHighlight(id) {
   if (!h) return;
   detailEl.innerHTML = `
     <div id="detail-header">
-      <span class="angle" style="--marker-color:${displayColorFor(h)}">${h.sales_angle || 'sin ángulo'}</span>
+      <span class="angle" style="--marker-color:${colorFor(h)}">${h.sales_angle || 'sin ángulo'}</span>
       <label id="color-picker-label">Color
-        <input type="color" id="highlight-color-picker" value="${colorFor(h)}" ${isolateMode ? 'disabled title="Desactivá Aislar para editar el color"' : ''}>
+        <input type="color" id="highlight-color-picker" value="${colorFor(h)}">
       </label>
     </div>
     <h2>${h.title || '(sin título)'}</h2>
@@ -953,20 +1377,12 @@ function selectHighlight(id) {
   document.getElementById('open-clip-editor-btn').addEventListener('click', () => openClipEditor(h));
 
   const captionsBtn = document.getElementById('captions-toggle-btn');
-  const renderCaptionsBtn = () => {
-    const on = h.captions_enabled !== false; // default ON, matches dashboard.py's prior hardcoded default
-    captionsBtn.classList.toggle('active', on);
-    captionsBtn.textContent = on ? 'Subtítulos ✓' : 'Subtítulos ✕';
-  };
-  renderCaptionsBtn();
+  const captionsOn = h.captions_enabled !== false; // default ON, matches dashboard.py's prior hardcoded default
+  captionsBtn.classList.toggle('active', captionsOn);
+  captionsBtn.textContent = captionsOn ? 'Subtítulos ✓' : 'Subtítulos ✕';
   captionsBtn.addEventListener('click', () => {
-    h.captions_enabled = h.captions_enabled === false; // was off (explicit false) -> turn on; anything else (on/missing) -> turn off
-    renderCaptionsBtn();
-    fetch(`/api/highlights/${h.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ captions_enabled: h.captions_enabled }),
-    }).catch(err => console.error('[editor] failed to save captions_enabled', err));
+    // was off (explicit false) -> turn on; anything else (on/missing) -> turn off
+    setCaptionsEnabled(h, h.captions_enabled === false);
   });
 
   const transcriptEl = document.getElementById('segment-transcript');
@@ -1227,28 +1643,6 @@ function setZoom(z, anchorClientX) {
 zoomSlider.addEventListener('input', () => setZoom(zoomFromSlider(Number(zoomSlider.value))));
 zoomInBtn.addEventListener('click', () => setZoom(zoomLevel * 1.5));
 zoomOutBtn.addEventListener('click', () => setZoom(zoomLevel / 1.5));
-zoomFitBtn.addEventListener('click', () => setZoom(1));
-
-const isolateBtn = document.getElementById('isolate-btn');
-// Reflect the persisted state loaded above immediately, before highlights
-// even arrive from the server.
-isolateBtn.classList.toggle('active', isolateMode);
-isolateBtn.textContent = isolateMode ? 'Aislar ✓' : 'Aislar';
-isolateBtn.addEventListener('click', () => {
-  isolateMode = !isolateMode;
-  localStorage.setItem(ISOLATE_STORAGE_KEY, isolateMode ? '1' : '0');
-  isolateBtn.classList.toggle('active', isolateMode);
-  isolateBtn.textContent = isolateMode ? 'Aislar ✓' : 'Aislar';
-  // Re-run selectHighlight (not just renderMarkers) when something is
-  // selected, so the angle badge color and the disabled color-picker state
-  // in the detail panel stay in sync with the new mode too.
-  if (selectedId != null && highlights.some(h => h.id === selectedId)) {
-    selectHighlight(selectedId);
-  } else {
-    renderMarkers();
-  }
-});
-
 timelineScroll.addEventListener('wheel', e => {
   if (!e.ctrlKey && !e.metaKey) return;
   e.preventDefault();
@@ -1398,12 +1792,56 @@ const clipModalRange = document.getElementById('clip-modal-range');
 const clipModalPlayhead = document.getElementById('clip-modal-playhead');
 const clipModalSelection = document.getElementById('clip-modal-selection');
 const clipModalWaveform = document.getElementById('clip-modal-waveform');
+const clipModalRulerCanvas = document.getElementById('clip-modal-ruler-canvas');
+const clipModalCaptionsOverlay = document.getElementById('clip-modal-captions-overlay');
+const clipModalPlayBtn = document.getElementById('clip-modal-playpause');
+const clipModalPlayTime = document.getElementById('clip-modal-playtime');
+const clipModalTranscriptEl = document.getElementById('clip-modal-transcript');
+const clipModalEl = document.getElementById('clip-modal');
+const clipModalMaximizeBtn = document.getElementById('clip-modal-maximize');
 const clipUndoBtn = document.getElementById('clip-undo');
 const clipRedoBtn = document.getElementById('clip-redo');
+const clipModalCropSwitch = document.getElementById('clip-modal-crop-switch');
+const clipModalCropPanel = document.getElementById('clip-modal-crop-panel');
+const clipModalCropBox = document.getElementById('clip-modal-crop-box');
+const clipModalCropPreviewWrap = document.getElementById('clip-modal-crop-preview-wrap');
+const clipModalCropCanvas = document.getElementById('clip-modal-crop-canvas');
+const clipCropZoomSlider = document.getElementById('clip-crop-zoom-slider');
+const clipCropAddKfBtn = document.getElementById('clip-crop-add-kf');
+const clipCropDelKfBtn = document.getElementById('clip-crop-del-kf');
+const clipCropKfCountEl = document.getElementById('clip-crop-kf-count');
+const CLIP_CROP_ASPECT = 9 / 16;
 const clipCutBtn = document.getElementById('clip-cut-btn');
 const clipSilenceBtn = document.getElementById('clip-silence-btn');
 const clipModalTitleEl = document.getElementById('clip-modal-title');
 const clipModalNumEl = document.getElementById('clip-modal-num');
+const clipModalCaptionsSwitch = document.getElementById('clip-modal-captions-switch');
+clipModalCaptionsSwitch.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const h = clipEditor.h;
+  setCaptionsEnabled(h, h.captions_enabled === false);
+});
+const clipModalSpeedGrid = document.getElementById('clip-modal-speed-grid');
+clipModalSpeedGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setSpeed(clipEditor.h, parseFloat(e.target.dataset.speed));
+});
+const clipModalFontGrid = document.getElementById('clip-modal-font-grid');
+clipModalFontGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setFont(clipEditor.h, e.target.dataset.font);
+});
+// Applies clipEditor.h.speed to the <video> element and turns on the
+// browser's built-in pitch-correction flag (vendor-prefixed variants for
+// older Firefox/Safari) so sped-up playback doesn't sound like a chipmunk.
+function applyClipPlaybackRate() {
+  if (!clipEditor) return;
+  const rate = clipEditor.h.speed || 1.0;
+  clipModalVideo.playbackRate = rate;
+  clipModalVideo.preservesPitch = true;
+  clipModalVideo.mozPreservesPitch = true;
+  clipModalVideo.webkitPreservesPitch = true;
+}
 const clipTimeStartEl = document.getElementById('clip-modal-time-start');
 const clipTimeEndEl = document.getElementById('clip-modal-time-end');
 const clipModalTimelineEl = document.getElementById('clip-modal-timeline');
@@ -1411,7 +1849,6 @@ const clipZoomSlider = document.getElementById('clip-zoom-slider');
 const clipZoomLabel = document.getElementById('clip-zoom-label');
 const clipZoomInBtn = document.getElementById('clip-zoom-in');
 const clipZoomOutBtn = document.getElementById('clip-zoom-out');
-const clipZoomFitBtn = document.getElementById('clip-zoom-fit');
 const CLIP_MIN_WINDOW_SPAN = 1; // seconds — how far the modal timeline can zoom in
 
 // clipEditor = { h, state:{start,end,cuts}, winStart, winEnd, history:[], histIdx, pendingSelection }
@@ -1419,6 +1856,7 @@ let clipEditor = null;
 let clipDragging = null;      // 'start' | 'end' while trimming a boundary
 let clipSelecting = false;    // true while drag-selecting a range to cut
 let clipJustSelected = false; // suppresses the seek-click right after a drag-select
+let clipPlayheadDragging = false; // suppresses the seek-click right after a playhead drag
 
 function cloneClipState(s) {
   return { start: s.start, end: s.end, cuts: s.cuts.map(c => ({ ...c })) };
@@ -1446,18 +1884,287 @@ function normalizeCuts(cuts, start, end) {
 function openClipEditor(h) {
   const initial = { start: h.start_time, end: h.end_time, cuts: (h.cuts || []).map(c => ({ ...c })) };
   clipEditor = { h, state: initial, winStart: 0, winEnd: duration, zoom: 1, history: [cloneClipState(initial)], histIdx: 0, pendingSelection: null };
+  clipEditor.crop = { enabled: !!h.crop_enabled, keyframes: (h.crop_keyframes || []).map(k => ({ ...k })) };
+  clipModalCropSwitch.classList.toggle('on', clipEditor.crop.enabled);
+  clipModalCropPanel.style.display = clipEditor.crop.enabled ? '' : 'none';
+  clipModalCropBox.classList.toggle('visible', clipEditor.crop.enabled);
+  clipModalCropPreviewWrap.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalNumEl.textContent = computeNumbering().get(h.id);
   clipModalTitleEl.textContent = h.title || '(sin título)';
   clipModalVideo.currentTime = h.start_time;
+  clipModalPlayTime.textContent = `0:00 / ${fmtShort(h.end_time - h.start_time)}`;
+  clipModalCaptionsSwitch.classList.toggle('on', h.captions_enabled !== false);
+  clipModalSpeedGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', parseFloat(chip.dataset.speed) === (h.speed || 1.0));
+  });
+  applyClipPlaybackRate();
+  clipModalFontGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.font === (h.font || 'extrabold'));
+  });
+  applyClipCaptionFont();
+  clipModalCaptionsOverlay.classList.remove('visible');
   clipModalOverlay.classList.add('open');
+  clipTranscriptActiveIdx = -1;
+  clipModalTranscriptEl.textContent = '';
   layoutClipWindow();
   updateUndoRedoButtons();
+  loadClipCaptions(h);
+  updateClipCropKfUI();
+  renderClipCropBox();
+  drawClipCropPreview();
 }
 
 function closeClipEditor() {
   clipModalOverlay.classList.remove('open');
+  clipModalCaptionsOverlay.classList.remove('visible');
   clipModalVideo.pause();
   clipEditor = null;
+}
+
+// Lets the modal expand to (almost) fill the viewport for a roomier editing
+// area; preference persists across clips/sessions via localStorage.
+let clipModalMaximized = localStorage.getItem('clipModalMaximized') === '1';
+function applyClipModalMaximized() {
+  clipModalEl.classList.toggle('maximized', clipModalMaximized);
+  clipModalMaximizeBtn.title = clipModalMaximized ? 'Restaurar tamaño' : 'Agrandar';
+  clipModalMaximizeBtn.classList.toggle('active', clipModalMaximized);
+  if (clipEditor) {
+    renderClipRange();
+    drawClipWaveform();
+    renderClipCropBox();
+    drawClipCropPreview();
+  }
+}
+clipModalMaximizeBtn.addEventListener('click', () => {
+  clipModalMaximized = !clipModalMaximized;
+  localStorage.setItem('clipModalMaximized', clipModalMaximized ? '1' : '0');
+  applyClipModalMaximized();
+});
+applyClipModalMaximized();
+
+// Draggable divider between the video block and the transcript panel. Only
+// the video gets an explicit height; the transcript is flex:1 (see CSS) so
+// it always fills whatever vertical space is left below the video down to
+// the bottom of the modal, instead of being capped at a small fixed height.
+const clipModalResizeHandle = document.getElementById('clip-modal-resize-handle');
+let clipVideoHeight = null;
+try { clipVideoHeight = parseFloat(localStorage.getItem('clipVideoHeight')) || null; } catch (e) {}
+function applyClipVideoTranscriptSizes() {
+  if (!clipVideoHeight) return;
+  clipModalVideo.style.maxHeight = clipVideoHeight + 'px';
+}
+applyClipVideoTranscriptSizes();
+clipModalResizeHandle.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const startY = e.clientY;
+  const startVideoH = clipModalVideo.getBoundingClientRect().height;
+  clipModalResizeHandle.classList.add('dragging');
+  const onMove = (ev) => {
+    const delta = ev.clientY - startY;
+    const newVideoH = Math.max(120, startVideoH + delta);
+    clipModalVideo.style.maxHeight = newVideoH + 'px';
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    clipModalResizeHandle.classList.remove('dragging');
+    clipVideoHeight = parseFloat(clipModalVideo.style.maxHeight);
+    localStorage.setItem('clipVideoHeight', String(clipVideoHeight));
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+// Live preview of the word-by-word burned subtitles (same data/coloring the
+// real export uses, see shorts_generator/local/subtitles.py) inside the
+// clip-editor modal, synced to clipModalVideo playback.
+const CAPTIONS_COLOR_OTHER = '#FFB020'; // matches COLOR_AMBER in subtitles.py
+
+async function loadClipCaptions(h) {
+  const editorAtRequest = clipEditor;
+  clipModalTranscriptEl.textContent = 'Cargando transcripción…';
+  try {
+    const res = await fetch(`/api/captions_range?start=${h.start_time}&end=${h.end_time}`);
+    const data = await res.json();
+    if (clipEditor !== editorAtRequest) return; // modal moved on to another clip
+    clipEditor.captionWords = data.words || [];
+    updateClipCaptionsOverlay();
+    renderClipTranscript();
+  } catch (err) {
+    console.error('[editor] failed to load captions_range', err);
+    clipModalTranscriptEl.textContent = 'No se pudo cargar la transcripción.';
+  }
+}
+
+// Adobe-Premiere-style transcript panel: same word timing/speaker data as the
+// burned-caption preview, but shown as full running text you can click to
+// jump the playhead, with the current word highlighted as it plays. Also
+// supports double-click-to-edit text and shift-click range selection to
+// manually correct who's speaking (both persisted via /api/word_override,
+// see editor_server.py _apply_transcript_overrides).
+async function saveClipWordOverride(w, payload) {
+  try {
+    const res = await fetch('/api/word_override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word_start: w.word_start, word_end: w.word_end, ...payload }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'error');
+  } catch (err) {
+    console.error('[editor] failed to save word override', err);
+  }
+}
+
+function startClipWordTextEdit(span, i) {
+  if (!clipEditor) return;
+  const w = clipEditor.captionWords[i];
+  const original = w.word;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'word-edit';
+  input.value = original.trim();
+  input.style.width = Math.max(2, input.value.length) + 'ch';
+  input.addEventListener('input', () => { input.style.width = Math.max(2, input.value.length) + 'ch'; });
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const trimmed = input.value.trim();
+    const trailingSpace = original.endsWith(' ') ? ' ' : '';
+    // An empty input is an intentional deletion (leave a silent gap),
+    // not a cancel — Escape already restores `original` before this runs.
+    const newText = trimmed ? trimmed + trailingSpace : '';
+    input.replaceWith(span);
+    if (newText !== original) {
+      w.word = newText;
+      span.textContent = newText;
+      span.classList.toggle('empty', !trimmed);
+      saveClipWordOverride(w, { text: newText });
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); input.value = original.trim(); input.blur(); }
+  });
+  input.addEventListener('blur', commit, { once: true });
+}
+
+let clipTranscriptSelAnchor = -1;
+let clipTranscriptSelRange = null; // [loIdx, hiIdx] inclusive, or null
+const clipTranscriptSelbarEl = document.getElementById('clip-transcript-selbar');
+const clipTranscriptSelbarLabel = document.getElementById('clip-transcript-selbar-label');
+
+function hideClipTranscriptSelbar() { clipTranscriptSelbarEl.classList.remove('visible'); }
+function showClipTranscriptSelbar(count) {
+  clipTranscriptSelbarLabel.textContent = `${count} palabra${count === 1 ? '' : 's'} seleccionada${count === 1 ? '' : 's'} — asignar a:`;
+  clipTranscriptSelbarEl.classList.add('visible');
+}
+function clearClipTranscriptSelection() {
+  clipTranscriptSelAnchor = -1;
+  clipTranscriptSelRange = null;
+  clipModalTranscriptEl.querySelectorAll('.word.selected').forEach(el => el.classList.remove('selected'));
+  hideClipTranscriptSelbar();
+}
+function extendClipTranscriptSelection(idx) {
+  if (clipTranscriptSelAnchor < 0) clipTranscriptSelAnchor = idx;
+  const lo = Math.min(clipTranscriptSelAnchor, idx);
+  const hi = Math.max(clipTranscriptSelAnchor, idx);
+  clipTranscriptSelRange = [lo, hi];
+  clipModalTranscriptEl.querySelectorAll('.word').forEach(el => {
+    const i = Number(el.dataset.idx);
+    el.classList.toggle('selected', i >= lo && i <= hi);
+  });
+  showClipTranscriptSelbar(hi - lo + 1);
+}
+document.getElementById('clip-transcript-selbar-cancel').addEventListener('click', clearClipTranscriptSelection);
+clipTranscriptSelbarEl.querySelectorAll('button[data-speaker]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!clipEditor || !clipTranscriptSelRange) return;
+    const [lo, hi] = clipTranscriptSelRange;
+    const speaker = btn.dataset.speaker;
+    const words = clipEditor.captionWords;
+    const affected = words.slice(lo, hi + 1);
+    affected.forEach(w => { w.speaker = speaker; });
+    renderClipTranscript();
+    updateClipTranscriptActiveWord();
+    await Promise.all(affected.map(w => saveClipWordOverride(w, { speaker })));
+  });
+});
+
+function renderClipTranscript() {
+  if (!clipEditor) return;
+  const words = clipEditor.captionWords || [];
+  clipTranscriptSelAnchor = -1;
+  clipTranscriptSelRange = null;
+  hideClipTranscriptSelbar();
+  if (!words.length) {
+    clipModalTranscriptEl.textContent = 'Sin transcripción disponible para este tramo.';
+    return;
+  }
+  clipModalTranscriptEl.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  words.forEach((w, i) => {
+    const span = document.createElement('span');
+    span.className = 'word' + (w.speaker === 'OTHER' ? ' other' : w.speaker === 'ROBERTO' ? ' roberto' : '') + (w.word.trim() ? '' : ' empty');
+    span.textContent = w.word;
+    span.dataset.idx = i;
+    span.addEventListener('click', (e) => {
+      if (!clipEditor) return;
+      if (e.shiftKey) {
+        e.preventDefault();
+        extendClipTranscriptSelection(i);
+        return;
+      }
+      clearClipTranscriptSelection();
+      clipModalVideo.currentTime = clipEditor.h.start_time + w.start;
+      updateClipTranscriptActiveWord();
+    });
+    span.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      startClipWordTextEdit(span, i);
+    });
+    frag.appendChild(span);
+    frag.appendChild(document.createTextNode(' '));
+  });
+  clipModalTranscriptEl.appendChild(frag);
+}
+
+let clipTranscriptActiveIdx = -1;
+function updateClipTranscriptActiveWord() {
+  if (!clipEditor || !clipEditor.captionWords) return;
+  const t = clipModalVideo.currentTime - clipEditor.h.start_time;
+  const idx = clipEditor.captionWords.findIndex(w => t >= w.start && t < w.end);
+  if (idx === clipTranscriptActiveIdx) return;
+  const prev = clipModalTranscriptEl.querySelector(`.word[data-idx="${clipTranscriptActiveIdx}"]`);
+  if (prev) prev.classList.remove('active');
+  clipTranscriptActiveIdx = idx;
+  if (idx < 0) return;
+  const cur = clipModalTranscriptEl.querySelector(`.word[data-idx="${idx}"]`);
+  if (cur) {
+    cur.classList.add('active');
+    cur.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function updateClipCaptionsOverlay() {
+  if (!clipEditor || clipEditor.h.captions_enabled === false || !clipEditor.captionWords) {
+    clipModalCaptionsOverlay.classList.remove('visible');
+    return;
+  }
+  const t = clipModalVideo.currentTime - clipEditor.h.start_time;
+  // Skip emptied words entirely (mirrors build_ass, which drops blank text) so
+  // the live preview shows the same silent gap the final render will have.
+  const word = clipEditor.captionWords.find(w => t >= w.start && t < w.end && w.word.trim());
+  if (!word) {
+    clipModalCaptionsOverlay.classList.remove('visible');
+    return;
+  }
+  clipModalCaptionsOverlay.textContent = word.word.trim();
+  clipModalCaptionsOverlay.style.color = word.speaker === 'OTHER' ? CAPTIONS_COLOR_OTHER : '#fff';
+  clipModalCaptionsOverlay.classList.add('visible');
 }
 
 document.getElementById('clip-modal-close').addEventListener('click', closeClipEditor);
@@ -1570,7 +2277,6 @@ function panClipWindow(dxPx) {
 
 clipZoomInBtn.addEventListener('click', () => setClipZoom((clipEditor?.zoom || 1) * 1.5));
 clipZoomOutBtn.addEventListener('click', () => setClipZoom((clipEditor?.zoom || 1) / 1.5));
-clipZoomFitBtn.addEventListener('click', () => layoutClipWindow());
 clipZoomSlider.addEventListener('input', () => {
   if (!clipEditor) return;
   const maxZoom = clipMaxZoom();
@@ -1639,7 +2345,55 @@ function renderClipRange() {
   });
 }
 
+function drawClipRuler() {
+  const canvas = clipModalRulerCanvas;
+  const width = canvas.parentElement.clientWidth;
+  const height = canvas.parentElement.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  if (!clipEditor) return;
+  const { winStart, winEnd } = clipEditor;
+  const span = winEnd - winStart;
+  if (span <= 0) return;
+  const pxPerSec = width / span;
+  const interval = niceRulerInterval(pxPerSec);
+  const firstTick = Math.max(0, Math.floor(winStart / interval)) * interval;
+
+  ctx.strokeStyle = 'rgba(230, 232, 235, 0.35)';
+  ctx.fillStyle = 'rgba(230, 232, 235, 0.75)';
+  ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textBaseline = 'top';
+
+  for (let t = firstTick; t <= winEnd + interval; t += interval) {
+    const x = (t - winStart) * pxPerSec;
+    ctx.beginPath();
+    ctx.moveTo(x, height - 6);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+    ctx.fillText(fmtRuler(t, interval), x + 3, 1);
+  }
+
+  if (clipEditor.crop && clipEditor.crop.enabled && clipEditor.crop.keyframes.length) {
+    ctx.fillStyle = 'rgba(255, 176, 32, 0.9)';
+    clipEditor.crop.keyframes.forEach(k => {
+      if (k.t < winStart || k.t > winEnd) return;
+      const x = (k.t - winStart) * pxPerSec;
+      ctx.beginPath();
+      ctx.moveTo(x - 4, height);
+      ctx.lineTo(x + 4, height);
+      ctx.lineTo(x, height - 6);
+      ctx.closePath();
+      ctx.fill();
+    });
+  }
+}
+
 function drawClipWaveform() {
+  drawClipRuler();
   const canvas = clipModalWaveform;
   const width = canvas.parentElement.clientWidth;
   const height = canvas.parentElement.clientHeight;
@@ -1668,6 +2422,252 @@ function drawClipWaveform() {
   }
 }
 
+// --- Manual vertical (9:16) crop, keyframe-based -----------------------
+// h.crop_keyframes holds {t, cx, cy, zoom} points on the SAME absolute time
+// axis as cuts/state.start/waveform/ruler (feedback_timeline_single_source_of_truth.md):
+// cx/cy are fractions (0-1) of the source video's natural width/height (crop
+// box center), zoom is a UI multiplier where 1 = crop height spans the full
+// natural frame height (least zoomed) and crop width is always derived as
+// crop_height * 9/16. Both the crop-box overlay and the vertical preview
+// canvas read the exact same interpolated point for clipModalVideo.currentTime,
+// so they can never drift apart from each other.
+
+function interpolateCropKeyframe(t) {
+  const kfs = (clipEditor && clipEditor.crop ? clipEditor.crop.keyframes : []).slice().sort((a, b) => a.t - b.t);
+  if (!kfs.length) return { cx: 0.5, cy: 0.5, zoom: 1 };
+  if (kfs.length === 1 || t <= kfs[0].t) return { cx: kfs[0].cx, cy: kfs[0].cy, zoom: kfs[0].zoom };
+  const last = kfs[kfs.length - 1];
+  if (t >= last.t) return { cx: last.cx, cy: last.cy, zoom: last.zoom };
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const a = kfs[i], b = kfs[i + 1];
+    if (t >= a.t && t <= b.t) {
+      const frac = (b.t - a.t) <= 0 ? 0 : (t - a.t) / (b.t - a.t);
+      return {
+        cx: a.cx + (b.cx - a.cx) * frac,
+        cy: a.cy + (b.cy - a.cy) * frac,
+        zoom: a.zoom + (b.zoom - a.zoom) * frac,
+      };
+    }
+  }
+  return { cx: 0.5, cy: 0.5, zoom: 1 };
+}
+
+function nearestCropKeyframe(t) {
+  const kfs = clipEditor && clipEditor.crop ? clipEditor.crop.keyframes : [];
+  if (!kfs.length) return null;
+  let best = kfs[0], bestDist = Math.abs(kfs[0].t - t);
+  for (const k of kfs) {
+    const d = Math.abs(k.t - t);
+    if (d < bestDist) { best = k; bestDist = d; }
+  }
+  return best;
+}
+
+function saveClipCrop() {
+  if (!clipEditor) return;
+  const { h, crop } = clipEditor;
+  h.crop_enabled = crop.enabled;
+  h.crop_keyframes = crop.keyframes.map(k => ({ ...k }));
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ crop_enabled: h.crop_enabled, crop_keyframes: h.crop_keyframes }),
+  }).catch(err => console.error('[editor] failed to save crop', err));
+}
+
+function updateClipCropKfUI() {
+  if (!clipEditor) return;
+  const kfs = clipEditor.crop.keyframes;
+  clipCropKfCountEl.textContent = kfs.length ? `${kfs.length} punto${kfs.length === 1 ? '' : 's'} clave` : 'sin puntos clave';
+  clipCropDelKfBtn.disabled = kfs.length === 0;
+  clipCropZoomSlider.value = interpolateCropKeyframe(clipModalVideo.currentTime).zoom;
+}
+
+// Positions the draggable overlay box on top of the <video> element itself:
+// #clip-modal-video-wrap is the offsetParent for both, so video.offsetLeft/Top
+// plus the video's own clientWidth/clientHeight (its actual rendered pixel box,
+// which already accounts for the aspect-ratio-preserving letterboxing caused
+// by max-height) give an exact reference frame without any extra layout math.
+function renderClipCropBox() {
+  if (!clipEditor || !clipEditor.crop.enabled) return;
+  const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
+  const dispW = clipModalVideo.clientWidth, dispH = clipModalVideo.clientHeight;
+  if (!vw || !vh || !dispW || !dispH) return;
+  const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime);
+  const cropH = vh / Math.max(1, zoom);
+  const cropW = cropH * CLIP_CROP_ASPECT;
+  const scaleX = dispW / vw, scaleY = dispH / vh;
+  const boxW = cropW * scaleX, boxH = cropH * scaleY;
+  let left = cx * vw * scaleX - boxW / 2;
+  let top = cy * vh * scaleY - boxH / 2;
+  left = Math.min(dispW - boxW, Math.max(0, left));
+  top = Math.min(dispH - boxH, Math.max(0, top));
+  clipModalCropBox.style.left = (clipModalVideo.offsetLeft + left) + 'px';
+  clipModalCropBox.style.top = (clipModalVideo.offsetTop + top) + 'px';
+  clipModalCropBox.style.width = boxW + 'px';
+  clipModalCropBox.style.height = boxH + 'px';
+}
+
+// Draws straight from the live <video> frame into the preview <canvas> (rather
+// than a second <video> element) so the vertical preview can never fall out of
+// sync with the main preview — there's no second decode/playback to keep in step.
+function drawClipCropPreview() {
+  if (!clipEditor || !clipEditor.crop.enabled) return;
+  const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
+  if (!vw || !vh) return;
+  const cw = clipModalCropPreviewWrap.clientWidth, ch = clipModalCropPreviewWrap.clientHeight;
+  if (!cw || !ch) return;
+  const dpr = window.devicePixelRatio || 1;
+  clipModalCropCanvas.width = cw * dpr;
+  clipModalCropCanvas.height = ch * dpr;
+  const ctx = clipModalCropCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cw, ch);
+  const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime);
+  const cropH = vh / Math.max(1, zoom);
+  const cropW = cropH * CLIP_CROP_ASPECT;
+  let srcX = Math.min(vw - cropW, Math.max(0, cx * vw - cropW / 2));
+  let srcY = Math.min(vh - cropH, Math.max(0, cy * vh - cropH / 2));
+  try {
+    ctx.drawImage(clipModalVideo, srcX, srcY, cropW, cropH, 0, 0, cw, ch);
+  } catch (err) { /* frame not decoded yet */ }
+}
+
+clipModalCropSwitch.addEventListener('click', () => {
+  if (!clipEditor) return;
+  clipEditor.crop.enabled = !clipEditor.crop.enabled;
+  clipModalCropSwitch.classList.toggle('on', clipEditor.crop.enabled);
+  clipModalCropPanel.style.display = clipEditor.crop.enabled ? '' : 'none';
+  clipModalCropBox.classList.toggle('visible', clipEditor.crop.enabled);
+  clipModalCropPreviewWrap.classList.toggle('visible', clipEditor.crop.enabled);
+  if (clipEditor.crop.enabled && clipEditor.crop.keyframes.length === 0) {
+    clipEditor.crop.keyframes.push({ t: clipModalVideo.currentTime, cx: 0.5, cy: 0.5, zoom: 1 });
+  }
+  updateClipCropKfUI();
+  renderClipCropBox();
+  drawClipCropPreview();
+  drawClipRuler();
+  saveClipCrop();
+});
+
+clipCropZoomSlider.addEventListener('input', () => {
+  if (!clipEditor || !clipEditor.crop.enabled) return;
+  const z = parseFloat(clipCropZoomSlider.value);
+  let kf = nearestCropKeyframe(clipModalVideo.currentTime);
+  if (!kf) {
+    kf = { t: clipModalVideo.currentTime, cx: 0.5, cy: 0.5, zoom: z };
+    clipEditor.crop.keyframes.push(kf);
+    clipCropKfCountEl.textContent = '1 punto clave';
+    clipCropDelKfBtn.disabled = false;
+    drawClipRuler();
+  } else {
+    kf.zoom = z;
+  }
+  renderClipCropBox();
+  drawClipCropPreview();
+});
+clipCropZoomSlider.addEventListener('change', () => { if (clipEditor) saveClipCrop(); });
+
+clipCropAddKfBtn.addEventListener('click', () => {
+  if (!clipEditor || !clipEditor.crop.enabled) return;
+  const t = clipModalVideo.currentTime;
+  const cur = interpolateCropKeyframe(t);
+  const existing = clipEditor.crop.keyframes.find(k => Math.abs(k.t - t) < 0.05);
+  if (existing) {
+    existing.cx = cur.cx; existing.cy = cur.cy; existing.zoom = cur.zoom;
+  } else {
+    clipEditor.crop.keyframes.push({ t, cx: cur.cx, cy: cur.cy, zoom: cur.zoom });
+  }
+  updateClipCropKfUI();
+  renderClipCropBox();
+  drawClipCropPreview();
+  drawClipRuler();
+  saveClipCrop();
+});
+
+clipCropDelKfBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const kf = nearestCropKeyframe(clipModalVideo.currentTime);
+  if (!kf) return;
+  clipEditor.crop.keyframes = clipEditor.crop.keyframes.filter(k => k !== kf);
+  updateClipCropKfUI();
+  renderClipCropBox();
+  drawClipCropPreview();
+  drawClipRuler();
+  saveClipCrop();
+});
+
+// Dragging the box body moves the nearest keyframe's position (cx, cy);
+// dragging its handle resizes it (zoom), mirroring the trim-handle drag
+// pattern elsewhere in the modal: live update on mousemove, PATCH only once
+// on mouseup ("save on release", not on every intermediate frame).
+let clipCropDragging = null; // 'move' | 'resize'
+let clipCropDragKf = null;
+
+function startClipCropDrag(mode) {
+  if (!clipEditor || !clipEditor.crop.enabled) return;
+  const t = clipModalVideo.currentTime;
+  let kf = nearestCropKeyframe(t);
+  if (!kf) {
+    const cur = interpolateCropKeyframe(t);
+    kf = { t, cx: cur.cx, cy: cur.cy, zoom: cur.zoom };
+    clipEditor.crop.keyframes.push(kf);
+    updateClipCropKfUI();
+    drawClipRuler();
+  }
+  clipCropDragging = mode;
+  clipCropDragKf = kf;
+  window.addEventListener('mousemove', onClipCropDrag);
+  window.addEventListener('mouseup', endClipCropDrag);
+}
+
+function onClipCropDrag(e) {
+  if (!clipCropDragging || !clipCropDragKf || !clipEditor) return;
+  const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
+  if (!vw || !vh) return;
+  const rect = clipModalVideo.getBoundingClientRect();
+  const scaleX = rect.width / vw, scaleY = rect.height / vh;
+  const kf = clipCropDragKf;
+  if (clipCropDragging === 'move') {
+    const cropH = vh / Math.max(1, kf.zoom);
+    const cropW = cropH * CLIP_CROP_ASPECT;
+    let cxPx = (e.clientX - rect.left) / scaleX;
+    let cyPx = (e.clientY - rect.top) / scaleY;
+    cxPx = Math.min(vw - cropW / 2, Math.max(cropW / 2, cxPx));
+    cyPx = Math.min(vh - cropH / 2, Math.max(cropH / 2, cyPx));
+    kf.cx = cxPx / vw;
+    kf.cy = cyPx / vh;
+  } else {
+    const centerYpx = kf.cy * vh * scaleY + rect.top;
+    const halfHeightPx = Math.max(10, e.clientY - centerYpx);
+    const newCropH = Math.min(vh, Math.max(vh / 4, (halfHeightPx * 2) / scaleY));
+    kf.zoom = Math.min(4, Math.max(1, vh / newCropH));
+    clipCropZoomSlider.value = kf.zoom;
+  }
+  renderClipCropBox();
+  drawClipCropPreview();
+}
+
+function endClipCropDrag() {
+  window.removeEventListener('mousemove', onClipCropDrag);
+  window.removeEventListener('mouseup', endClipCropDrag);
+  clipCropDragging = null;
+  clipCropDragKf = null;
+  if (clipEditor) saveClipCrop();
+}
+
+clipModalCropBox.addEventListener('mousedown', e => {
+  if (e.target.closest('.crop-handle')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  startClipCropDrag('move');
+});
+clipModalCropBox.querySelector('.crop-handle').addEventListener('mousedown', e => {
+  e.preventDefault();
+  e.stopPropagation();
+  startClipCropDrag('resize');
+});
+
 function startClipTrim(e, field) {
   e.preventDefault();
   e.stopPropagation();
@@ -1694,7 +2694,6 @@ function endClipTrimDrag() {
   clipDragging = null;
   window.removeEventListener('mousemove', onClipTrimDrag);
   window.removeEventListener('mouseup', endClipTrimDrag);
-  layoutClipWindow(); // re-center the padded window so the user can keep stretching further
   commitClipHistory();
 }
 
@@ -1748,7 +2747,37 @@ clipModalTrack.addEventListener('click', e => {
   if (!clipEditor) return;
   if (e.target.classList.contains('handle') || e.target.classList.contains('clip-cut')) return;
   if (clipJustSelected) { clipJustSelected = false; return; }
-  clipModalVideo.currentTime = clipTimeFromEvent(e);
+  if (clipPlayheadDragging) { clipPlayheadDragging = false; return; }
+  const { state } = clipEditor;
+  clipModalVideo.currentTime = Math.min(state.end, Math.max(state.start, clipTimeFromEvent(e)));
+});
+
+// Drag the red playhead line directly (CapCut-style scrubbing), instead of
+// only being able to jump to a new position by clicking elsewhere.
+clipModalPlayhead.addEventListener('mousedown', e => {
+  if (!clipEditor) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const wasPlaying = !clipModalVideo.paused;
+  clipModalVideo.pause();
+  const onMove = ev => {
+    const { state } = clipEditor;
+    const t = Math.min(state.end, Math.max(state.start, clipTimeFromEvent(ev)));
+    clipModalVideo.currentTime = t;
+    clipModalPlayhead.style.left = clipPct(t, clipEditor.winStart, clipEditor.winEnd) + '%';
+    clipModalPlayTime.textContent = `${fmtShort(t - state.start)} / ${fmtShort(state.end - state.start)}`;
+    updateClipCaptionsOverlay();
+    updateClipTranscriptActiveWord();
+  };
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    clipPlayheadDragging = true;
+    setTimeout(() => { clipPlayheadDragging = false; }, 0);
+    if (wasPlaying) clipModalVideo.play();
+  };
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
 });
 
 clipCutBtn.addEventListener('click', () => {
@@ -1798,7 +2827,8 @@ function undoClipEdit() {
   if (!clipEditor || clipEditor.histIdx <= 0) return;
   clipEditor.histIdx--;
   clipEditor.state = cloneClipState(clipEditor.history[clipEditor.histIdx]);
-  layoutClipWindow();
+  renderClipRange();
+  drawClipWaveform();
   updateUndoRedoButtons();
   saveClipEdits();
 }
@@ -1807,7 +2837,8 @@ function redoClipEdit() {
   if (!clipEditor || clipEditor.histIdx >= clipEditor.history.length - 1) return;
   clipEditor.histIdx++;
   clipEditor.state = cloneClipState(clipEditor.history[clipEditor.histIdx]);
-  layoutClipWindow();
+  renderClipRange();
+  drawClipWaveform();
   updateUndoRedoButtons();
   saveClipEdits();
 }
@@ -1822,6 +2853,7 @@ clipRedoBtn.addEventListener('click', redoClipEdit);
 function saveClipEdits() {
   if (!clipEditor) return;
   const { h, state } = clipEditor;
+  const rangeChanged = h.start_time !== state.start || h.end_time !== state.end;
   h.start_time = state.start;
   h.end_time = state.end;
   h.cuts = state.cuts.map(c => ({ ...c }));
@@ -1832,16 +2864,36 @@ function saveClipEdits() {
   }).catch(err => console.error('[editor] failed to save clip edits', err));
   renderMarkers();
   renderClipsList();
+  // Stretching either edge of the clip changes which words fall inside it, so
+  // the transcript panel (fetched once for [h.start_time, h.end_time] on open)
+  // needs to be refetched — but only on an actual bounds change, not on every
+  // cut/silence-removal edit, which don't touch start/end and would otherwise
+  // flash "Cargando transcripción…" for no reason.
+  if (rangeChanged) {
+    clipModalPlayTime.textContent = `${fmtShort(clipModalVideo.currentTime - state.start)} / ${fmtShort(state.end - state.start)}`;
+    loadClipCaptions(h);
+  }
 }
 
 // Skips playback over cut ranges live, so the preview already plays as if
 // the silences/cuts were removed even though nothing is re-encoded yet.
+// The video only ever shows/plays the selected clip: preload=metadata + no
+// native controls means the browser can't be used to scrub into the rest of
+// the source, and this clamps every other path (track clicks, cut-skipping,
+// programmatic seeks) back inside [state.start, state.end] too.
 clipModalVideo.addEventListener('timeupdate', () => {
   if (!clipEditor) return;
   const { state } = clipEditor;
   const t0 = clipModalVideo.currentTime;
   const activeCut = state.cuts.find(c => t0 >= c.start_time && t0 < c.end_time);
   if (activeCut) clipModalVideo.currentTime = activeCut.end_time;
+  if (clipModalVideo.currentTime < state.start) {
+    clipModalVideo.currentTime = state.start;
+  } else if (clipModalVideo.currentTime >= state.end) {
+    clipModalVideo.currentTime = state.end;
+    clipModalVideo.pause();
+  }
+  clipModalPlayTime.textContent = `${fmtShort(clipModalVideo.currentTime - state.start)} / ${fmtShort(state.end - state.start)}`;
   const t = clipModalVideo.currentTime;
   if (clipEditor.zoom > 1 && (t < clipEditor.winStart || t > clipEditor.winEnd)) {
     const span = clipEditor.winEnd - clipEditor.winStart;
@@ -1855,7 +2907,52 @@ clipModalVideo.addEventListener('timeupdate', () => {
     drawClipWaveform();
   }
   clipModalPlayhead.style.left = clipPct(t, clipEditor.winStart, clipEditor.winEnd) + '%';
+  updateClipCaptionsOverlay();
+  updateClipTranscriptActiveWord();
+  if (clipEditor.crop.enabled) {
+    updateClipCropKfUI();
+    renderClipCropBox();
+    drawClipCropPreview();
+  }
 });
+
+// timeupdate only fires a few times per second, which is coarse enough that
+// short words appear noticeably late; drive the caption overlay off rAF
+// while playing so it tracks currentTime every frame instead.
+let clipCaptionsRafId = null;
+function clipCaptionsRafTick() {
+  updateClipCaptionsOverlay();
+  updateClipTranscriptActiveWord();
+  if (clipEditor && clipEditor.crop.enabled) {
+    renderClipCropBox();
+    drawClipCropPreview();
+  }
+  if (clipEditor && !clipModalVideo.paused && !clipModalVideo.ended) {
+    clipCaptionsRafId = requestAnimationFrame(clipCaptionsRafTick);
+  } else {
+    clipCaptionsRafId = null;
+  }
+}
+clipModalVideo.addEventListener('play', () => {
+  clipModalPlayBtn.innerHTML = '&#10074;&#10074;';
+  if (clipCaptionsRafId == null) clipCaptionsRafId = requestAnimationFrame(clipCaptionsRafTick);
+});
+clipModalVideo.addEventListener('pause', () => {
+  clipModalPlayBtn.innerHTML = '&#9654;';
+  if (clipCaptionsRafId != null) { cancelAnimationFrame(clipCaptionsRafId); clipCaptionsRafId = null; }
+});
+
+function toggleClipPlayback() {
+  if (!clipEditor) return;
+  if (clipModalVideo.paused) {
+    if (clipModalVideo.currentTime >= clipEditor.state.end) clipModalVideo.currentTime = clipEditor.state.start;
+    clipModalVideo.play();
+  } else {
+    clipModalVideo.pause();
+  }
+}
+clipModalPlayBtn.addEventListener('click', toggleClipPlayback);
+clipModalVideo.addEventListener('click', toggleClipPlayback);
 
 loadHighlights();
 loadWaveform();
