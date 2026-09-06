@@ -422,8 +422,8 @@
   #clip-modal-body { display: flex; min-height: 0; overflow: hidden; }
   #clip-modal-video-col { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
   #clip-modal-video-row { display: flex; gap: 10px; align-items: flex-start; }
-  #clip-modal-video-wrap { position: relative; flex: 1; min-width: 0; }
-  #clip-modal-video { width: 100%; max-height: 40vh; background: #000; display: block; cursor: pointer; }
+  #clip-modal-video-wrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; }
+  #clip-modal-video { max-width: 100%; max-height: 40vh; width: auto; height: auto; object-fit: contain; display: block; cursor: pointer; }
   #clip-modal-crop-preview-wrap {
     position: relative;
     flex-shrink: 0;
@@ -437,6 +437,28 @@
     display: none;
   }
   #clip-modal-crop-preview-wrap.visible { display: block; }
+  #clip-modal-crop-resize-handle {
+    flex-shrink: 0;
+    width: 9px;
+    align-self: stretch;
+    cursor: col-resize;
+    position: relative;
+    display: none;
+  }
+  #clip-modal-crop-resize-handle.visible { display: block; }
+  #clip-modal-crop-resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 3px;
+    height: 32px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  #clip-modal-crop-resize-handle:hover::after,
+  #clip-modal-crop-resize-handle.dragging::after { background: var(--accent-line); }
   #clip-modal-crop-canvas { width: 100%; height: 100%; display: block; }
   #clip-modal-crop-preview-label {
     position: absolute;
@@ -943,6 +965,7 @@
         <span id="clip-modal-playtime">0:00 / 0:00</span>
       </div>
     </div>
+    <div id="clip-modal-crop-resize-handle" title="Arrastrá para agrandar/achicar"></div>
     <div id="clip-modal-crop-preview-wrap">
       <canvas id="clip-modal-crop-canvas"></canvas>
       <span id="clip-modal-crop-preview-label">Vertical</span>
@@ -1075,6 +1098,7 @@
 
 <script>
 const video = document.getElementById('player');
+const playerWrap = document.getElementById('player-wrap');
 const timeline = document.getElementById('timeline');
 const playhead = document.getElementById('playhead');
 const waveformCanvas = document.getElementById('waveform-canvas');
@@ -1806,6 +1830,8 @@ const clipModalCropPanel = document.getElementById('clip-modal-crop-panel');
 const clipModalCropBox = document.getElementById('clip-modal-crop-box');
 const clipModalCropPreviewWrap = document.getElementById('clip-modal-crop-preview-wrap');
 const clipModalCropCanvas = document.getElementById('clip-modal-crop-canvas');
+const clipModalCropResizeHandle = document.getElementById('clip-modal-crop-resize-handle');
+const clipModalVideoRow = document.getElementById('clip-modal-video-row');
 const clipCropZoomSlider = document.getElementById('clip-crop-zoom-slider');
 const clipCropAddKfBtn = document.getElementById('clip-crop-add-kf');
 const clipCropDelKfBtn = document.getElementById('clip-crop-del-kf');
@@ -1889,6 +1915,7 @@ function openClipEditor(h) {
   clipModalCropPanel.style.display = clipEditor.crop.enabled ? '' : 'none';
   clipModalCropBox.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalCropPreviewWrap.classList.toggle('visible', clipEditor.crop.enabled);
+  clipModalCropResizeHandle.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalNumEl.textContent = computeNumbering().get(h.id);
   clipModalTitleEl.textContent = h.title || '(sin título)';
   clipModalVideo.currentTime = h.start_time;
@@ -1904,6 +1931,8 @@ function openClipEditor(h) {
   applyClipCaptionFont();
   clipModalCaptionsOverlay.classList.remove('visible');
   clipModalOverlay.classList.add('open');
+  video.pause();
+  playerWrap.style.visibility = 'hidden';
   clipTranscriptActiveIdx = -1;
   clipModalTranscriptEl.textContent = '';
   layoutClipWindow();
@@ -1918,6 +1947,7 @@ function closeClipEditor() {
   clipModalOverlay.classList.remove('open');
   clipModalCaptionsOverlay.classList.remove('visible');
   clipModalVideo.pause();
+  playerWrap.style.visibility = '';
   clipEditor = null;
 }
 
@@ -1941,6 +1971,15 @@ clipModalMaximizeBtn.addEventListener('click', () => {
   applyClipModalMaximized();
 });
 applyClipModalMaximized();
+// #clip-modal's width/height animate via CSS transition, so the crop box/preview
+// (positioned off getBoundingClientRect) must be redrawn again once it settles —
+// otherwise they're computed against mid-transition geometry and end up misaligned.
+clipModalEl.addEventListener('transitionend', (e) => {
+  if ((e.propertyName === 'width' || e.propertyName === 'height') && clipEditor) {
+    renderClipCropBox();
+    drawClipCropPreview();
+  }
+});
 
 // Draggable divider between the video block and the transcript panel. Only
 // the video gets an explicit height; the transcript is flex:1 (see CSS) so
@@ -1970,6 +2009,54 @@ clipModalResizeHandle.addEventListener('mousedown', (e) => {
     clipModalResizeHandle.classList.remove('dragging');
     clipVideoHeight = parseFloat(clipModalVideo.style.maxHeight);
     localStorage.setItem('clipVideoHeight', String(clipVideoHeight));
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+});
+
+// Draggable divider to resize the vertical crop-preview panel. Width is the
+// only thing we ever set explicitly — height comes from the wrap's CSS
+// `aspect-ratio: 9/16`, so the box can never get distorted the way it would
+// if we set width/height independently. No CSS `transition` is defined on
+// the video-wrap/preview-wrap/video (unlike the modal maximize animation
+// above), so a synchronous read right after setting the style already
+// reflects final, settled geometry — no transitionend redraw needed here.
+let clipCropPreviewWidth = null;
+try { clipCropPreviewWidth = parseFloat(localStorage.getItem('clipCropPreviewWidth')) || null; } catch (e) {}
+function applyClipCropPreviewWidth() {
+  if (!clipCropPreviewWidth) return;
+  clipModalCropPreviewWrap.style.width = clipCropPreviewWidth + 'px';
+}
+applyClipCropPreviewWidth();
+clipModalCropResizeHandle.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const startX = e.clientX;
+  const startWidth = clipModalCropPreviewWrap.getBoundingClientRect().width;
+  const rowWidth = clipModalVideoRow.getBoundingClientRect().width;
+  const handleWidth = clipModalCropResizeHandle.getBoundingClientRect().width;
+  // Clamp to whatever `max-height: 40vh` (aspect-ratio 9/16) allows, and to
+  // leave the main video at least ~200px wide, so growing the preview can
+  // never push it past its own height cap or squeeze the video to nothing.
+  const maxHeightPx = parseFloat(getComputedStyle(clipModalCropPreviewWrap).maxHeight) || Infinity;
+  const maxByAspect = maxHeightPx * (9 / 16);
+  const maxByRow = rowWidth - 200 - handleWidth - 20;
+  const maxWidth = Math.max(70, Math.min(maxByAspect, maxByRow));
+  clipModalCropResizeHandle.classList.add('dragging');
+  const onMove = (ev) => {
+    const delta = ev.clientX - startX;
+    const newWidth = Math.min(maxWidth, Math.max(70, startWidth - delta));
+    clipModalCropPreviewWrap.style.width = newWidth + 'px';
+    if (clipEditor) {
+      renderClipCropBox();
+      drawClipCropPreview();
+    }
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    clipModalCropResizeHandle.classList.remove('dragging');
+    clipCropPreviewWidth = parseFloat(clipModalCropPreviewWrap.style.width);
+    localStorage.setItem('clipCropPreviewWidth', String(clipCropPreviewWidth));
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -2432,24 +2519,17 @@ function drawClipWaveform() {
 // canvas read the exact same interpolated point for clipModalVideo.currentTime,
 // so they can never drift apart from each other.
 
+// Corte directo (no paneo): cada keyframe define el encuadre "desde acá hasta
+// el próximo", y al llegar al tiempo del siguiente salta de golpe a su valor.
 function interpolateCropKeyframe(t) {
   const kfs = (clipEditor && clipEditor.crop ? clipEditor.crop.keyframes : []).slice().sort((a, b) => a.t - b.t);
   if (!kfs.length) return { cx: 0.5, cy: 0.5, zoom: 1 };
-  if (kfs.length === 1 || t <= kfs[0].t) return { cx: kfs[0].cx, cy: kfs[0].cy, zoom: kfs[0].zoom };
-  const last = kfs[kfs.length - 1];
-  if (t >= last.t) return { cx: last.cx, cy: last.cy, zoom: last.zoom };
-  for (let i = 0; i < kfs.length - 1; i++) {
-    const a = kfs[i], b = kfs[i + 1];
-    if (t >= a.t && t <= b.t) {
-      const frac = (b.t - a.t) <= 0 ? 0 : (t - a.t) / (b.t - a.t);
-      return {
-        cx: a.cx + (b.cx - a.cx) * frac,
-        cy: a.cy + (b.cy - a.cy) * frac,
-        zoom: a.zoom + (b.zoom - a.zoom) * frac,
-      };
-    }
+  let current = kfs[0];
+  for (const kf of kfs) {
+    if (kf.t > t) break;
+    current = kf;
   }
-  return { cx: 0.5, cy: 0.5, zoom: 1 };
+  return { cx: current.cx, cy: current.cy, zoom: current.zoom };
 }
 
 function nearestCropKeyframe(t) {
@@ -2483,16 +2563,34 @@ function updateClipCropKfUI() {
   clipCropZoomSlider.value = interpolateCropKeyframe(clipModalVideo.currentTime).zoom;
 }
 
+// #clip-modal-video uses object-fit:contain, so its clientWidth/clientHeight is
+// just the outer box — the actual decoded frame is letterboxed/pillarboxed
+// inside it whenever the box aspect ratio doesn't match the video's own. Both
+// the crop-box overlay and the drag handler need the real content sub-rect
+// (in px, relative to the video element's own box), not the outer box, or the
+// box ends up positioned/scaled against blank letterbox space instead of the
+// actual frame the vertical preview is sampling from.
+function getClipVideoContentRect() {
+  const boxW = clipModalVideo.clientWidth, boxH = clipModalVideo.clientHeight;
+  const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
+  if (!boxW || !boxH || !vw || !vh) return null;
+  const boxAspect = boxW / boxH, mediaAspect = vw / vh;
+  let width, height;
+  if (mediaAspect > boxAspect) { width = boxW; height = boxW / mediaAspect; }
+  else { height = boxH; width = boxH * mediaAspect; }
+  return { left: (boxW - width) / 2, top: (boxH - height) / 2, width, height };
+}
+
 // Positions the draggable overlay box on top of the <video> element itself:
 // #clip-modal-video-wrap is the offsetParent for both, so video.offsetLeft/Top
-// plus the video's own clientWidth/clientHeight (its actual rendered pixel box,
-// which already accounts for the aspect-ratio-preserving letterboxing caused
-// by max-height) give an exact reference frame without any extra layout math.
+// plus the content rect's own offset (see getClipVideoContentRect) give an
+// exact reference frame for the actual displayed frame, letterboxing included.
 function renderClipCropBox() {
   if (!clipEditor || !clipEditor.crop.enabled) return;
   const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
-  const dispW = clipModalVideo.clientWidth, dispH = clipModalVideo.clientHeight;
-  if (!vw || !vh || !dispW || !dispH) return;
+  const content = getClipVideoContentRect();
+  if (!vw || !vh || !content) return;
+  const dispW = content.width, dispH = content.height;
   const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime);
   const cropH = vh / Math.max(1, zoom);
   const cropW = cropH * CLIP_CROP_ASPECT;
@@ -2502,8 +2600,8 @@ function renderClipCropBox() {
   let top = cy * vh * scaleY - boxH / 2;
   left = Math.min(dispW - boxW, Math.max(0, left));
   top = Math.min(dispH - boxH, Math.max(0, top));
-  clipModalCropBox.style.left = (clipModalVideo.offsetLeft + left) + 'px';
-  clipModalCropBox.style.top = (clipModalVideo.offsetTop + top) + 'px';
+  clipModalCropBox.style.left = (clipModalVideo.offsetLeft + content.left + left) + 'px';
+  clipModalCropBox.style.top = (clipModalVideo.offsetTop + content.top + top) + 'px';
   clipModalCropBox.style.width = boxW + 'px';
   clipModalCropBox.style.height = boxH + 'px';
 }
@@ -2540,6 +2638,7 @@ clipModalCropSwitch.addEventListener('click', () => {
   clipModalCropPanel.style.display = clipEditor.crop.enabled ? '' : 'none';
   clipModalCropBox.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalCropPreviewWrap.classList.toggle('visible', clipEditor.crop.enabled);
+  clipModalCropResizeHandle.classList.toggle('visible', clipEditor.crop.enabled);
   if (clipEditor.crop.enabled && clipEditor.crop.keyframes.length === 0) {
     clipEditor.crop.keyframes.push({ t: clipModalVideo.currentTime, cx: 0.5, cy: 0.5, zoom: 1 });
   }
@@ -2624,8 +2723,15 @@ function startClipCropDrag(mode) {
 function onClipCropDrag(e) {
   if (!clipCropDragging || !clipCropDragKf || !clipEditor) return;
   const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
-  if (!vw || !vh) return;
-  const rect = clipModalVideo.getBoundingClientRect();
+  const content = getClipVideoContentRect();
+  if (!vw || !vh || !content) return;
+  const videoRect = clipModalVideo.getBoundingClientRect();
+  const rect = {
+    left: videoRect.left + content.left,
+    top: videoRect.top + content.top,
+    width: content.width,
+    height: content.height,
+  };
   const scaleX = rect.width / vw, scaleY = rect.height / vh;
   const kf = clipCropDragKf;
   if (clipCropDragging === 'move') {

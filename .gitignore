@@ -7,3 +7,4 @@ output/
 *.mp4
 .DS_Store
 fixtures/
+.claude_tmp/
