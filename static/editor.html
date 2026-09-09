@@ -620,6 +620,7 @@
   #clip-modal-ruler {
     position: relative;
     height: 16px;
+    flex-shrink: 0;
     margin: 14px 16px 0;
     background: var(--bg);
     border: 1px solid var(--border-soft);
@@ -2823,6 +2824,20 @@ clipModalTimelineEl.addEventListener('wheel', e => {
   e.preventDefault();
   panClipWindow(dx);
 }, { passive: false });
+
+// The ruler and waveform canvases size their drawing buffer off clientWidth
+// at draw time (see drawClipRuler/drawClipWaveform), so they only stay in
+// sync with the caption track (%-based, reflows on its own) if something
+// redraws them whenever the column's actual width changes — window resize,
+// but also internal reflow (tools column wrapping, video height changing).
+// Without this they go stale until the next zoom/pan action.
+const clipModalVideoCol = document.getElementById('clip-modal-video-col');
+const clipTimelineResizeObserver = new ResizeObserver(() => {
+  if (!clipEditor) return;
+  drawClipWaveform(); // also redraws the ruler
+  renderCaptionBlocks();
+});
+clipTimelineResizeObserver.observe(clipModalVideoCol);
 
 function renderClipRange() {
   const { state, winStart, winEnd } = clipEditor;
