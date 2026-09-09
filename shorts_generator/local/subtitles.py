@@ -242,6 +242,17 @@ def build_ass(
 ) -> str:
     lines = [_ass_header(font_name, size=size, position=position, style=style, color=color)]
     fixed_style = color != DEFAULT_CAPTION_COLOR
+
+    def _display_end(i: int) -> float:
+        # Bridge silences between words: a caption stays on screen until the
+        # next (non-blank) word starts, instead of blanking out during the
+        # pause and popping back in — there's no reason for it to disappear
+        # while the clip is still playing continuously.
+        for j in range(i + 1, len(words)):
+            if words[j]["word"].strip():
+                return words[j]["start"]
+        return words[i]["end"]
+
     group_for_index: Dict[int, tuple] = {}
     if words_per_group > 1:
         for g_start, g_end in _group_boundaries(words, words_per_group):
@@ -252,7 +263,7 @@ def build_ass(
         if not text:
             continue
         start = _ass_timestamp(w["start"])
-        end = _ass_timestamp(max(w["end"], w["start"] + 0.05))
+        end = _ass_timestamp(max(_display_end(i), w["start"] + 0.05))
         ass_style = STYLE_FIXED if fixed_style else _style_for_speaker(w.get("speaker"))
 
         if words_per_group > 1:

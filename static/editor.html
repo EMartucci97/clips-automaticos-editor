@@ -2675,10 +2675,18 @@ function updateClipCaptionsOverlay() {
     return;
   }
   const t = clipModalVideo.currentTime - clipEditor.h.start_time;
-  // Skip emptied words entirely (mirrors build_ass, which drops blank text) so
-  // the live preview shows the same silent gap the final render will have.
   const words = clipEditor.captionWords;
-  const idx = words.findIndex(w => t >= w.start && t < w.end && w.word.trim());
+  // A word's caption stays on screen until the next (non-blank) word starts,
+  // bridging silences instead of blanking out mid-pause — mirrors
+  // _display_end in build_ass (subtitles.py).
+  const idx = words.findIndex((w, i) => {
+    if (!w.word.trim() || t < w.start) return false;
+    let end = w.end;
+    for (let j = i + 1; j < words.length; j++) {
+      if (words[j].word.trim()) { end = words[j].start; break; }
+    }
+    return t < end;
+  });
   if (idx < 0) {
     clipModalCaptionsOverlay.classList.remove('visible');
     return;
