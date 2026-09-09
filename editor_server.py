@@ -8,6 +8,7 @@ Usage:
 import argparse
 import json
 import os
+import threading
 import wave
 from pathlib import Path
 
@@ -23,7 +24,14 @@ from shorts_generator.local.diarizer import (
     diarize_and_label,
 )
 from shorts_generator.local.llm import call_local_llm
-from shorts_generator.local.subtitles import FONT_CHOICES, words_for_window
+from shorts_generator.local.subtitles import (
+    CAPTION_COLORS,
+    CAPTION_POSITIONS,
+    CAPTION_SIZES,
+    CAPTION_STYLES,
+    FONT_CHOICES,
+    words_for_window,
+)
 from shorts_generator.local.transcriber import transcribe_local
 
 app = Flask(__name__)
@@ -80,30 +88,41 @@ Transcripción del tramo (con timestamps):
 \"\"\"{text}\"\"\""""
 
 
+_highlights_lock = threading.Lock()
+
+
 def _highlights_cache_path(source_path: str) -> Path:
     stem = Path(source_path).stem
     return Path(LOCAL_OUTPUT_DIR) / f"{stem}.editor_highlights.json"
 
 
+def _atomic_write_json(path: Path, data) -> None:
+    """Write JSON so a crash or a racing writer never leaves torn/partial bytes."""
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
 def _load_or_build_highlights(source_path: str) -> list:
     cache_path = _highlights_cache_path(source_path)
-    if cache_path.exists():
-        print(f"[editor] reusing cached highlights: {cache_path}", flush=True)
-        with open(cache_path) as f:
-            return json.load(f)
+    with _highlights_lock:
+        if cache_path.exists():
+            print(f"[editor] reusing cached highlights: {cache_path}", flush=True)
+            with open(cache_path) as f:
+                return json.load(f)
 
-    transcript = transcribe_local(source_path)
-    transcript = diarize_and_label(source_path, transcript)
-    result = get_highlights(transcript, num_clips=NUM_CLIPS, llm_fn=call_local_llm)
-    highlights = result.get("highlights", [])
-    for i, h in enumerate(highlights):
-        h["id"] = i
+        transcript = transcribe_local(source_path)
+        transcript = diarize_and_label(source_path, transcript)
+        result = get_highlights(transcript, num_clips=NUM_CLIPS, llm_fn=call_local_llm)
+        highlights = result.get("highlights", [])
+        for i, h in enumerate(highlights):
+            h["id"] = i
 
-    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
-    with open(cache_path, "w") as f:
-        json.dump(highlights, f, indent=2, ensure_ascii=False)
-    print(f"[editor] wrote {len(highlights)} highlight marker(s) -> {cache_path}", flush=True)
-    return highlights
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+        _atomic_write_json(cache_path, highlights)
+        print(f"[editor] wrote {len(highlights)} highlight marker(s) -> {cache_path}", flush=True)
+        return highlights
 
 
 @app.route("/")
@@ -203,8 +222,13 @@ def _load_overrides(source_path: str) -> dict:
 
 def _save_overrides(source_path: str, overrides: dict) -> None:
     os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
-    with open(_overrides_cache_path(source_path), "w") as f:
+    dest = _overrides_cache_path(source_path)
+    # Write-then-rename so a concurrent request reading the file never sees a
+    # half-written/truncated JSON body (os.replace is atomic on POSIX and Windows).
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    with open(tmp, "w") as f:
         json.dump(overrides, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, dest)
 
 
 def _word_key(start: float, end: float) -> str:
@@ -424,6 +448,42 @@ def api_word_override():
     return jsonify({"ok": True})
 
 
+@app.route("/api/word_overrides_bulk", methods=["POST"])
+def api_word_overrides_bulk():
+    """Same as /api/word_override but applies a whole batch in one
+    read-modify-write, so a client-side bulk edit (e.g. strip punctuation or
+    toggle case across a clip's words) can't race itself across concurrent
+    requests and corrupt/lose overrides."""
+    body = request.get_json(force=True) or {}
+    items = body.get("words")
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "words required"}), 400
+
+    overrides = _load_overrides(SOURCE_PATH)
+    for item in items:
+        try:
+            word_start = float(item.get("word_start"))
+            word_end = float(item.get("word_end"))
+        except (TypeError, ValueError):
+            continue
+        text = item.get("text")
+        speaker = item.get("speaker")
+        if speaker is not None and speaker not in (ROBERTO_LABEL, OTHER_LABEL):
+            continue
+        if text is None and speaker is None:
+            continue
+        entry = overrides.setdefault("words", {}).setdefault(_word_key(word_start, word_end), {})
+        if text is not None:
+            entry["text"] = str(text)
+        if speaker is not None:
+            entry["speaker"] = speaker
+    _save_overrides(SOURCE_PATH, overrides)
+
+    transcript = _get_diarized_transcript(SOURCE_PATH)
+    _apply_transcript_overrides(transcript, overrides)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/analyze_segment", methods=["POST"])
 def api_analyze_segment():
     body = request.get_json(force=True) or {}
@@ -508,44 +568,44 @@ def api_analyze_full_video():
     clips = _sanitize_clip_candidates(raw_clips, duration)
 
     cache_path = _highlights_cache_path(SOURCE_PATH)
-    highlights = []
-    if cache_path.exists():
-        with open(cache_path) as f:
-            highlights = json.load(f)
+    with _highlights_lock:
+        highlights = []
+        if cache_path.exists():
+            with open(cache_path) as f:
+                highlights = json.load(f)
 
-    # Drop any temas from a previous run of this endpoint before appending
-    # the fresh batch, so re-running doesn't pile up stale duplicates.
-    highlights = [h for h in highlights if h.get("kind") != "tema"]
-    next_id = max((h["id"] for h in highlights), default=-1) + 1
+        # Drop any temas from a previous run of this endpoint before appending
+        # the fresh batch, so re-running doesn't pile up stale duplicates.
+        highlights = [h for h in highlights if h.get("kind") != "tema"]
+        next_id = max((h["id"] for h in highlights), default=-1) + 1
 
-    for clip in clips:
-        highlights.append({
-            "id": next_id,
-            "kind": "tema",
-            "title": clip["title"],
-            "central_theme": clip["title"],
-            "start_time": clip["start_time"],
-            "end_time": clip["end_time"],
-            "sales_angle": "",
-            "score": None,
-            "sales_angle_score": None,
-            "hook_sentence": "",
-            # Each clip is already a complete, self-contained candidate (not
-            # a container to be split further), so it points to itself here
-            # — this lets the frontend reuse it directly instead of firing
-            # an on-demand /api/analyze_segment call when it's opened.
-            "subtopics": [{
-                "text": clip["title"],
+        for clip in clips:
+            highlights.append({
+                "id": next_id,
+                "kind": "tema",
+                "title": clip["title"],
+                "central_theme": clip["title"],
                 "start_time": clip["start_time"],
                 "end_time": clip["end_time"],
-            }],
-        })
-        next_id += 1
+                "sales_angle": "",
+                "score": None,
+                "sales_angle_score": None,
+                "hook_sentence": "",
+                # Each clip is already a complete, self-contained candidate (not
+                # a container to be split further), so it points to itself here
+                # — this lets the frontend reuse it directly instead of firing
+                # an on-demand /api/analyze_segment call when it's opened.
+                "subtopics": [{
+                    "text": clip["title"],
+                    "start_time": clip["start_time"],
+                    "end_time": clip["end_time"],
+                }],
+            })
+            next_id += 1
 
-    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
-    with open(cache_path, "w") as f:
-        json.dump(highlights, f, indent=2, ensure_ascii=False)
-    print(f"[editor] wrote {len(clips)} full-video clip(s) -> {cache_path}", flush=True)
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+        _atomic_write_json(cache_path, highlights)
+        print(f"[editor] wrote {len(clips)} full-video clip(s) -> {cache_path}", flush=True)
 
     return jsonify(highlights)
 
@@ -609,57 +669,92 @@ def api_highlights():
 @app.route("/api/highlights/<int:highlight_id>", methods=["PATCH"])
 def api_patch_highlight(highlight_id):
     cache_path = _highlights_cache_path(SOURCE_PATH)
-    if not cache_path.exists():
-        return jsonify({"error": "no highlights cached yet"}), 404
-
-    with open(cache_path) as f:
-        highlights = json.load(f)
-
-    match = next((h for h in highlights if h.get("id") == highlight_id), None)
-    if match is None:
-        return jsonify({"error": f"highlight {highlight_id} not found"}), 404
-
     body = request.get_json(force=True) or {}
-    if "start_time" in body:
-        match["start_time"] = float(body["start_time"])
-    if "end_time" in body:
-        match["end_time"] = float(body["end_time"])
-    if "transcript_override" in body:
-        match["transcript_override"] = str(body["transcript_override"])
-    if "color" in body:
-        if body["color"]:
-            match["color"] = str(body["color"])
-        else:
-            match.pop("color", None)
-    if "captions_enabled" in body:
-        match["captions_enabled"] = bool(body["captions_enabled"])
-    if "speed" in body:
-        match["speed"] = float(body["speed"])
-    if "font" in body:
-        font_key = str(body["font"])
-        if font_key not in FONT_CHOICES:
-            return jsonify({"error": f"unknown font '{font_key}'"}), 400
-        match["font"] = font_key
-    if "cuts" in body:
-        match["cuts"] = [
-            {"start_time": float(c["start_time"]), "end_time": float(c["end_time"])}
-            for c in body["cuts"]
-        ]
-    if "crop_enabled" in body:
-        match["crop_enabled"] = bool(body["crop_enabled"])
-    if "crop_keyframes" in body:
-        match["crop_keyframes"] = [
-            {
-                "t": float(k["t"]),
-                "cx": float(k["cx"]),
-                "cy": float(k["cy"]),
-                "zoom": float(k["zoom"]),
-            }
-            for k in body["crop_keyframes"]
-        ]
 
-    with open(cache_path, "w") as f:
-        json.dump(highlights, f, indent=2, ensure_ascii=False)
+    with _highlights_lock:
+        if not cache_path.exists():
+            return jsonify({"error": "no highlights cached yet"}), 404
+
+        with open(cache_path) as f:
+            highlights = json.load(f)
+
+        match = next((h for h in highlights if h.get("id") == highlight_id), None)
+        if match is None:
+            return jsonify({"error": f"highlight {highlight_id} not found"}), 404
+        if "start_time" in body:
+            match["start_time"] = float(body["start_time"])
+        if "end_time" in body:
+            match["end_time"] = float(body["end_time"])
+        if "transcript_override" in body:
+            match["transcript_override"] = str(body["transcript_override"])
+        if "color" in body:
+            if body["color"]:
+                match["color"] = str(body["color"])
+            else:
+                match.pop("color", None)
+        if "captions_enabled" in body:
+            match["captions_enabled"] = bool(body["captions_enabled"])
+        if "speed" in body:
+            match["speed"] = float(body["speed"])
+        if "font" in body:
+            font_key = str(body["font"])
+            if font_key not in FONT_CHOICES:
+                return jsonify({"error": f"unknown font '{font_key}'"}), 400
+            match["font"] = font_key
+        if "caption_color" in body:
+            color_key = str(body["caption_color"])
+            if color_key not in CAPTION_COLORS:
+                return jsonify({"error": f"unknown caption_color '{color_key}'"}), 400
+            match["caption_color"] = color_key
+        if "caption_size" in body:
+            size_key = str(body["caption_size"])
+            if size_key not in CAPTION_SIZES:
+                return jsonify({"error": f"unknown caption_size '{size_key}'"}), 400
+            match["caption_size"] = size_key
+        if "caption_position" in body:
+            position_key = str(body["caption_position"])
+            if position_key not in CAPTION_POSITIONS:
+                return jsonify({"error": f"unknown caption_position '{position_key}'"}), 400
+            match["caption_position"] = position_key
+        if "caption_words" in body:
+            words_count = int(body["caption_words"])
+            if words_count not in (1, 2, 3):
+                return jsonify({"error": f"unknown caption_words '{words_count}'"}), 400
+            match["caption_words"] = words_count
+        if "caption_style" in body:
+            style_key = str(body["caption_style"])
+            if style_key not in CAPTION_STYLES:
+                return jsonify({"error": f"unknown caption_style '{style_key}'"}), 400
+            match["caption_style"] = style_key
+        if "cuts" in body:
+            match["cuts"] = [
+                {"start_time": float(c["start_time"]), "end_time": float(c["end_time"])}
+                for c in body["cuts"]
+            ]
+        if "crop_enabled" in body:
+            match["crop_enabled"] = bool(body["crop_enabled"])
+        if "crop_keyframes" in body:
+            match["crop_keyframes"] = [
+                {
+                    "t": float(k["t"]),
+                    "cx": float(k["cx"]),
+                    "cy": float(k["cy"]),
+                    "zoom": float(k["zoom"]),
+                }
+                for k in body["crop_keyframes"]
+            ]
+        if "caption_time_overrides" in body:
+            match["caption_time_overrides"] = [
+                {
+                    "word_start": float(o["word_start"]),
+                    "word_end": float(o["word_end"]),
+                    "start": float(o["start"]),
+                    "end": float(o["end"]),
+                }
+                for o in body["caption_time_overrides"]
+            ]
+
+        _atomic_write_json(cache_path, highlights)
 
     return jsonify(match)
 

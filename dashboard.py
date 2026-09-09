@@ -23,6 +23,7 @@ import streamlit as st
 
 from shorts_generator.config import LOCAL_OUTPUT_DIR
 from shorts_generator.local import active_speaker, clipper, subtitles, transcriber, two_camera
+from shorts_generator.local.diarizer import diarize_and_label
 from shorts_generator.local.drive import (
     download_drive_file,
     download_drive_folder,
@@ -32,6 +33,7 @@ from shorts_generator.local.downloader import download_youtube_local
 from shorts_generator.local.llm import call_local_llm
 from shorts_generator.highlights import get_highlights
 from shorts_generator.local.phrase_search import find_phrase_clips
+from editor_server import _apply_transcript_overrides, _load_overrides
 
 st.set_page_config(page_title="Clips dashboard", layout="wide")
 
@@ -215,65 +217,26 @@ def _find_result_json_metadata(clip_path: str):
     return None
 
 
-def _load_captions_preference(source: str, start: float, end: float) -> bool:
-    """Per-highlight on/off preference for burned subtitles, set via the
-    'Subtítulos' toggle in the standalone editor (editor_server.py, static/
-    editor.html) and stored alongside its highlights cache. Defaults to True
-    (subtitles on) when there's no editor cache, or no highlight there
-    matches this start/end closely enough — same default this checkbox
-    always had before the toggle existed."""
+def _find_highlight_override(source: str, start: float, end: float) -> dict:
+    """Looks up the highlight (if any) matching this start/end in the
+    standalone editor's cache (editor_server.py, static/editor.html), so the
+    'Regenerar clip' controls below can preload whatever was set there
+    (captions on/off, speed, font, caption color/size/position/words/style).
+    Returns {} when there's no editor cache, or no highlight matches this
+    start/end closely enough — callers then fall back to their own defaults."""
     if not source:
-        return True
+        return {}
     stem = os.path.splitext(os.path.basename(source))[0]
     cache_path = os.path.join(LOCAL_OUTPUT_DIR, f"{stem}.editor_highlights.json")
     try:
         with open(cache_path) as f:
             highlights = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return True
+        return {}
     for h in highlights:
         if abs(h.get("start_time", -1e9) - start) < 1.0 and abs(h.get("end_time", -1e9) - end) < 1.0:
-            return bool(h.get("captions_enabled", True))
-    return True
-
-
-def _load_speed_preference(source: str, start: float, end: float) -> float:
-    """Per-highlight playback speed set via the 'Velocidad' control in the
-    standalone editor (editor_server.py, static/editor.html), same lookup
-    pattern as _load_captions_preference above. Defaults to 1.0x."""
-    if not source:
-        return 1.0
-    stem = os.path.splitext(os.path.basename(source))[0]
-    cache_path = os.path.join(LOCAL_OUTPUT_DIR, f"{stem}.editor_highlights.json")
-    try:
-        with open(cache_path) as f:
-            highlights = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return 1.0
-    for h in highlights:
-        if abs(h.get("start_time", -1e9) - start) < 1.0 and abs(h.get("end_time", -1e9) - end) < 1.0:
-            return float(h.get("speed", 1.0))
-    return 1.0
-
-
-def _load_font_preference(source: str, start: float, end: float) -> str:
-    """Per-highlight subtitle font choice set via the 'Fuente' control in the
-    standalone editor, same lookup pattern as _load_captions_preference above.
-    Defaults to subtitles.DEFAULT_FONT_KEY."""
-    if not source:
-        return subtitles.DEFAULT_FONT_KEY
-    stem = os.path.splitext(os.path.basename(source))[0]
-    cache_path = os.path.join(LOCAL_OUTPUT_DIR, f"{stem}.editor_highlights.json")
-    try:
-        with open(cache_path) as f:
-            highlights = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return subtitles.DEFAULT_FONT_KEY
-    for h in highlights:
-        if abs(h.get("start_time", -1e9) - start) < 1.0 and abs(h.get("end_time", -1e9) - end) < 1.0:
-            key = h.get("font", subtitles.DEFAULT_FONT_KEY)
-            return key if key in subtitles.FONT_CHOICES else subtitles.DEFAULT_FONT_KEY
-    return subtitles.DEFAULT_FONT_KEY
+            return h
+    return {}
 
 
 def _load_clip_metadata(clip_path: str):
@@ -465,10 +428,12 @@ if job:
         st.session_state.overrides = overrides
 
         aspect_ratio = st.selectbox("Aspect ratio", ["9:16", "1:1", "4:5"], index=0)
-        captions_default = _load_captions_preference(job["source"], job["start"], job["end"])
-        burn_subs = st.checkbox("Quemar subtítulos", value=captions_default, key=f"burn_subs_{job_key}")
+        override = _find_highlight_override(job["source"], job["start"], job["end"])
+        burn_subs = st.checkbox(
+            "Quemar subtítulos", value=bool(override.get("captions_enabled", True)), key=f"burn_subs_{job_key}",
+        )
 
-        speed_default = _load_speed_preference(job["source"], job["start"], job["end"])
+        speed_default = float(override.get("speed", 1.0))
         speed_options = [1.0, 1.1, 1.2, 1.3]
         speed = st.select_slider(
             "Velocidad (mantiene el tono de voz)",
@@ -478,7 +443,9 @@ if job:
             key=f"speed_{job_key}",
         )
 
-        font_default = _load_font_preference(job["source"], job["start"], job["end"])
+        font_default = override.get("font", subtitles.DEFAULT_FONT_KEY)
+        if font_default not in subtitles.FONT_CHOICES:
+            font_default = subtitles.DEFAULT_FONT_KEY
         font_key = st.radio(
             "Fuente de los subtítulos",
             list(subtitles.FONT_CHOICES.keys()),
@@ -486,6 +453,69 @@ if job:
             format_func=lambda k: subtitles.FONT_CHOICES[k],
             horizontal=True,
             key=f"font_{job_key}",
+        )
+
+        caption_color_default = override.get("caption_color", subtitles.DEFAULT_CAPTION_COLOR)
+        if caption_color_default not in subtitles.CAPTION_COLORS:
+            caption_color_default = subtitles.DEFAULT_CAPTION_COLOR
+        caption_color_labels = {"auto": "Auto", "white": "Blanco", "yellow": "Amarillo", "cyan": "Celeste", "pink": "Rosa"}
+        caption_color = st.radio(
+            "Color de los subtítulos",
+            list(subtitles.CAPTION_COLORS.keys()),
+            index=list(subtitles.CAPTION_COLORS.keys()).index(caption_color_default),
+            format_func=lambda k: caption_color_labels.get(k, k),
+            horizontal=True,
+            key=f"caption_color_{job_key}",
+        )
+
+        caption_size_default = override.get("caption_size", subtitles.DEFAULT_CAPTION_SIZE)
+        if caption_size_default not in subtitles.CAPTION_SIZES:
+            caption_size_default = subtitles.DEFAULT_CAPTION_SIZE
+        caption_size_labels = {"s": "Chico", "m": "Mediano", "l": "Grande", "xl": "Extra grande"}
+        caption_size = st.radio(
+            "Tamaño de los subtítulos",
+            list(subtitles.CAPTION_SIZES.keys()),
+            index=list(subtitles.CAPTION_SIZES.keys()).index(caption_size_default),
+            format_func=lambda k: caption_size_labels.get(k, k),
+            horizontal=True,
+            key=f"caption_size_{job_key}",
+        )
+
+        caption_position_default = override.get("caption_position", subtitles.DEFAULT_CAPTION_POSITION)
+        if caption_position_default not in subtitles.CAPTION_POSITIONS:
+            caption_position_default = subtitles.DEFAULT_CAPTION_POSITION
+        caption_position_labels = {"bottom": "Abajo", "middle": "Centro", "top": "Arriba"}
+        caption_position = st.radio(
+            "Posición de los subtítulos",
+            list(subtitles.CAPTION_POSITIONS.keys()),
+            index=list(subtitles.CAPTION_POSITIONS.keys()).index(caption_position_default),
+            format_func=lambda k: caption_position_labels.get(k, k),
+            horizontal=True,
+            key=f"caption_position_{job_key}",
+        )
+
+        caption_words_default = int(override.get("caption_words", 1))
+        if caption_words_default not in (1, 2, 3):
+            caption_words_default = 1
+        caption_words = st.radio(
+            "Palabras en pantalla a la vez",
+            [1, 2, 3],
+            index=[1, 2, 3].index(caption_words_default),
+            horizontal=True,
+            key=f"caption_words_{job_key}",
+        )
+
+        caption_style_default = override.get("caption_style", subtitles.DEFAULT_CAPTION_STYLE)
+        if caption_style_default not in subtitles.CAPTION_STYLES:
+            caption_style_default = subtitles.DEFAULT_CAPTION_STYLE
+        caption_style_labels = {"karaoke": "Karaoke", "bold": "Bold", "minimal": "Minimal", "highlight": "Highlight"}
+        caption_style = st.radio(
+            "Estilo de los subtítulos",
+            list(subtitles.CAPTION_STYLES),
+            index=list(subtitles.CAPTION_STYLES).index(caption_style_default),
+            format_func=lambda k: caption_style_labels.get(k, k),
+            horizontal=True,
+            key=f"caption_style_{job_key}",
         )
 
         split_screen = st.checkbox(
@@ -561,11 +591,21 @@ if job:
                     )
                 if burn_subs:
                     transcript = transcriber.transcribe_local(job["source"])
-                    words = subtitles.words_for_window(transcript["segments"], job["start"], job["end"])
+                    transcript = diarize_and_label(job["source"], transcript)
+                    _apply_transcript_overrides(transcript, _load_overrides(job["source"]))
+                    words = subtitles.words_for_window(
+                        transcript["segments"], job["start"], job["end"],
+                        time_overrides=override.get("caption_time_overrides"),
+                    )
                     tmp_subbed = out_path + ".subbed.mp4"
                     subtitles.burn_subtitles(
                         out_path, words, tmp_subbed,
                         font_name=subtitles.FONT_CHOICES[font_key],
+                        size=subtitles.CAPTION_SIZES[caption_size],
+                        position=caption_position,
+                        style=caption_style,
+                        color=caption_color,
+                        words_per_group=caption_words,
                     )
                     os.replace(tmp_subbed, out_path)
                 if speed != 1.0:

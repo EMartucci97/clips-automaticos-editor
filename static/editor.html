@@ -24,6 +24,13 @@
     --sub-color: #3d5a99;
   }
   * { box-sizing: border-box; }
+  html, body {
+    /* Without this, a two-finger trackpad swipe over the timeline/waveform
+       (deltaX-driven panning) also triggers Chrome/macOS's browser-level
+       back/forward navigation gesture, even though the wheel handlers below
+       already call preventDefault() to pan instead. */
+    overscroll-behavior-x: none;
+  }
   body {
     margin: 0;
     background: var(--bg);
@@ -629,15 +636,73 @@
   }
   #clip-modal-timeline {
     position: relative;
-    height: 64px;
-    margin: 0 16px 4px;
+    height: 96px;
+    flex-shrink: 0;
+    margin: 0 16px 0;
     background: var(--bg);
     border: 1px solid var(--border-soft);
     border-radius: 0 0 8px 8px;
     overflow: hidden;
   }
-  #clip-modal-waveform { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  #clip-modal-track { position: relative; height: 100%; }
+  #clip-modal-waveform { position: absolute; top: 0; left: 0; right: 0; height: 64px; width: 100%; pointer-events: none; }
+  #clip-modal-track { position: relative; height: 64px; }
+  #clip-modal-captions-track {
+    position: absolute;
+    left: 0; right: 0;
+    top: 64px;
+    height: 32px;
+    border-top: 1px solid var(--border-soft);
+  }
+  /* Drag handle to grow/shrink the caption track above so word blocks are
+     legible without depending on horizontal zoom (which doesn't help — the
+     blocks are narrow because they're short in time, not because of scale). */
+  #clip-modal-captions-resize-handle {
+    height: 9px;
+    margin: 0 16px 4px;
+    cursor: row-resize;
+    position: relative;
+  }
+  #clip-modal-captions-resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 32px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  #clip-modal-captions-resize-handle:hover::after,
+  #clip-modal-captions-resize-handle.dragging::after { background: var(--accent-line); }
+  .caption-block {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    display: flex;
+    align-items: center;
+    background: rgba(120, 170, 255, 0.25);
+    border: 1px solid rgba(140, 180, 255, 0.7);
+    border-radius: 3px;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 10px;
+    padding: 0 4px;
+    color: #dce8ff;
+    cursor: grab;
+    z-index: 3;
+  }
+  .caption-block:hover { outline: 1px solid #8cb4ff; }
+  .caption-block.dragging { cursor: grabbing; }
+  .caption-block-handle {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 6px;
+    cursor: ew-resize;
+    z-index: 4;
+  }
+  .caption-block-handle.left { left: -3px; }
+  .caption-block-handle.right { right: -3px; }
   #clip-modal-range {
     position: absolute;
     top: 6px;
@@ -993,7 +1058,9 @@
         <div id="clip-modal-selection"></div>
         <div id="clip-modal-playhead"></div>
       </div>
+      <div id="clip-modal-captions-track"></div>
     </div>
+    <div id="clip-modal-captions-resize-handle" title="Arrastrá para agrandar/achicar el canal de subtítulos"></div>
     <div id="clip-modal-times">
       <span id="clip-modal-time-start"></span>
       <span id="clip-modal-time-end"></span>
@@ -1032,18 +1099,62 @@
           <span class="tool-label">Subtítulos</span>
           <div class="switch" id="clip-modal-captions-switch" title="Subtítulos quemados al exportar este clip (blanco/ámbar por hablante)"></div>
         </div>
-        <div class="style-grid">
-          <span class="style-chip active" title="Estilo real, usado al generar el corto">Karaoke</span>
-          <span class="style-chip" title="Próximamente">Bold</span>
-          <span class="style-chip" title="Próximamente">Minimal</span>
-          <span class="style-chip" title="Próximamente">Highlight</span>
-        </div>
-        <div class="tool-row">
-          <span class="tool-label">Fuente</span>
-        </div>
-        <div class="style-grid" id="clip-modal-font-grid">
-          <span class="style-chip active" data-font="extrabold">ExtraBold</span>
-          <span class="style-chip" data-font="black">Black</span>
+        <div id="clip-modal-subtitle-options">
+          <div class="style-grid" id="clip-modal-style-grid">
+            <span class="style-chip active" data-style="karaoke">Karaoke</span>
+            <span class="style-chip" data-style="bold">Bold</span>
+            <span class="style-chip" data-style="minimal">Minimal</span>
+            <span class="style-chip" data-style="highlight">Highlight</span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">Fuente</span>
+          </div>
+          <div class="style-grid" id="clip-modal-font-grid">
+            <span class="style-chip active" data-font="extrabold">ExtraBold</span>
+            <span class="style-chip" data-font="black">Black</span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">Color</span>
+          </div>
+          <div class="style-grid" id="clip-modal-color-grid">
+            <span class="style-chip active" data-color="auto">Auto</span>
+            <span class="style-chip" data-color="white">Blanco</span>
+            <span class="style-chip" data-color="yellow">Amarillo</span>
+            <span class="style-chip" data-color="cyan">Celeste</span>
+            <span class="style-chip" data-color="pink">Rosa</span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">Tamaño</span>
+          </div>
+          <div class="style-grid" id="clip-modal-size-grid">
+            <span class="style-chip" data-size="s">Chico</span>
+            <span class="style-chip active" data-size="m">Mediano</span>
+            <span class="style-chip" data-size="l">Grande</span>
+            <span class="style-chip" data-size="xl">Extra grande</span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">Posición</span>
+          </div>
+          <div class="style-grid" id="clip-modal-position-grid">
+            <span class="style-chip active" data-position="bottom">Abajo</span>
+            <span class="style-chip" data-position="middle">Centro</span>
+            <span class="style-chip" data-position="top">Arriba</span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">Palabras a la vez</span>
+          </div>
+          <div class="style-grid" id="clip-modal-words-grid">
+            <span class="style-chip active" data-words="1">1</span>
+            <span class="style-chip" data-words="2">2</span>
+            <span class="style-chip" data-words="3">3</span>
+          </div>
+          <div class="tool-row">
+            <span class="tool-label">Texto</span>
+            <div style="display:flex; gap:6px;">
+              <button type="button" id="clip-caption-strip-punct-btn" class="tool-btn" title="Elimina puntos y comas del texto de los subtítulos">Quitar . ,</button>
+              <button type="button" id="clip-caption-toggle-case-btn" class="tool-btn" title="Alterna todo el texto de los subtítulos entre MAYÚSCULAS y minúsculas">Aa ⇄ AA</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="tool-section">
@@ -1182,6 +1293,7 @@ function setCaptionsEnabled(h, enabled) {
   const modalSwitch = document.getElementById('clip-modal-captions-switch');
   if (modalSwitch && clipEditor && clipEditor.h === h) {
     modalSwitch.classList.toggle('on', enabled);
+    if (clipModalSubtitleOptions) clipModalSubtitleOptions.style.display = enabled ? '' : 'none';
     if (!enabled) {
       const overlay = document.getElementById('clip-modal-captions-overlay');
       if (overlay) overlay.classList.remove('visible');
@@ -1254,6 +1366,148 @@ function applyClipCaptionFont() {
   clipModalCaptionsOverlay.style.fontFamily = preview.family;
   clipModalCaptionsOverlay.style.fontWeight = preview.weight;
 }
+
+// Mirrors shorts_generator/local/subtitles.py's CAPTION_COLORS — "auto" keeps
+// the per-speaker white/amber split done elsewhere in the overlay update.
+const CLIP_CAPTION_COLOR_PREVIEW = {
+  auto: null,
+  white: '#fff',
+  yellow: '#ffff00',
+  cyan: '#00ffff',
+  pink: '#ff69b4',
+};
+// Mirrors CAPTION_SIZES (ASS pt sizes) as preview font-sizes; scaled down
+// since the overlay renders at CSS px over a video much smaller than the
+// 1080x1920 ASS canvas the real burned captions are sized against.
+const CLIP_CAPTION_SIZE_PREVIEW = { s: '16px', m: '22px', l: '28px', xl: '34px' };
+
+function genericGridSetter(grid, datasetKey, matchValue) {
+  if (!grid) return;
+  grid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset[datasetKey] === String(matchValue));
+  });
+}
+
+function setCaptionStyle(h, styleKey) {
+  h.caption_style = styleKey;
+  if (clipEditor && clipEditor.h === h) {
+    genericGridSetter(clipModalStyleGrid, 'style', styleKey);
+    updateClipCaptionsOverlay();
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ caption_style: styleKey }),
+  }).catch(err => console.error('[editor] failed to save caption_style', err));
+}
+
+function setCaptionColor(h, colorKey) {
+  h.caption_color = colorKey;
+  if (clipEditor && clipEditor.h === h) {
+    genericGridSetter(clipModalColorGrid, 'color', colorKey);
+    updateClipCaptionsOverlay();
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ caption_color: colorKey }),
+  }).catch(err => console.error('[editor] failed to save caption_color', err));
+}
+
+function setCaptionSize(h, sizeKey) {
+  h.caption_size = sizeKey;
+  if (clipEditor && clipEditor.h === h) {
+    genericGridSetter(clipModalSizeGrid, 'size', sizeKey);
+    clipModalCaptionsOverlay.style.fontSize = CLIP_CAPTION_SIZE_PREVIEW[sizeKey] || CLIP_CAPTION_SIZE_PREVIEW.m;
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ caption_size: sizeKey }),
+  }).catch(err => console.error('[editor] failed to save caption_size', err));
+}
+
+function setCaptionPosition(h, positionKey) {
+  h.caption_position = positionKey;
+  if (clipEditor && clipEditor.h === h) {
+    genericGridSetter(clipModalPositionGrid, 'position', positionKey);
+    applyClipCaptionPosition();
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ caption_position: positionKey }),
+  }).catch(err => console.error('[editor] failed to save caption_position', err));
+}
+
+function applyClipCaptionPosition() {
+  if (!clipEditor) return;
+  const position = clipEditor.h.caption_position || 'bottom';
+  clipModalCaptionsOverlay.style.top = position === 'top' ? '8%' : position === 'middle' ? '46%' : '';
+  clipModalCaptionsOverlay.style.bottom = position === 'bottom' ? '8%' : '';
+}
+
+function setCaptionWords(h, wordsCount) {
+  h.caption_words = wordsCount;
+  if (clipEditor && clipEditor.h === h) {
+    genericGridSetter(clipModalWordsGrid, 'words', wordsCount);
+    updateClipCaptionsOverlay();
+    renderCaptionBlocks();
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ caption_words: wordsCount }),
+  }).catch(err => console.error('[editor] failed to save caption_words', err));
+}
+
+// Bulk text edit across every word in the open clip's caption range. Saved
+// via /api/word_overrides_bulk (one read-modify-write for the whole batch)
+// rather than one /api/word_override call per word — firing dozens of
+// concurrent single-word writes raced on the shared overrides file and could
+// corrupt or drop entries. Both the live preview and the real burn (which
+// read the same transcript overrides) pick this up automatically.
+function applyClipCaptionTextTransform(transformFn) {
+  if (!clipEditor || !clipEditor.captionWords) return;
+  const words = clipEditor.captionWords;
+  const changed = [];
+  words.forEach(w => {
+    const trimmed = w.word.trim();
+    if (!trimmed) return;
+    const newTrimmed = transformFn(trimmed);
+    if (newTrimmed === trimmed) return;
+    const trailingSpace = w.word.endsWith(' ') ? ' ' : '';
+    const newText = newTrimmed + trailingSpace;
+    w.word = newText;
+    changed.push(w);
+  });
+  if (!changed.length) return;
+  renderClipTranscript();
+  updateClipTranscriptActiveWord();
+  updateClipCaptionsOverlay();
+  renderCaptionBlocks();
+  fetch('/api/word_overrides_bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      words: changed.map(w => ({ word_start: w.word_start, word_end: w.word_end, text: w.word })),
+    }),
+  }).catch(err => console.error('[editor] failed to save bulk word overrides', err));
+}
+
+function stripClipCaptionPunctuation() {
+  applyClipCaptionTextTransform(t => t.replace(/[.,]/g, ''));
+}
+
+function toggleClipCaptionCase() {
+  if (!clipEditor || !clipEditor.captionWords) return;
+  const sample = clipEditor.captionWords.map(w => w.word.trim()).filter(Boolean).join('');
+  const isAllUpper = sample && sample === sample.toUpperCase() && sample !== sample.toLowerCase();
+  applyClipCaptionTextTransform(isAllUpper ? (t => t.toLowerCase()) : (t => t.toUpperCase()));
+}
+
+document.getElementById('clip-caption-strip-punct-btn').addEventListener('click', stripClipCaptionPunctuation);
+document.getElementById('clip-caption-toggle-case-btn').addEventListener('click', toggleClipCaptionCase);
 
 function renderSubmarkers() {
   timeline.querySelectorAll('.submarker').forEach(el => el.remove());
@@ -1590,15 +1844,11 @@ function niceRulerInterval(pxPerSec) {
   return RULER_STEPS[RULER_STEPS.length - 1];
 }
 
-function fmtRuler(sec, interval) {
-  sec = Math.max(0, Math.round(sec * 1000) / 1000);
+function fmtRuler(sec) {
+  sec = Math.max(0, Math.round(sec));
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
-  const ms = Math.round((sec - Math.floor(sec)) * 1000);
-  if (interval < 1) {
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
-  }
   if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
@@ -1620,20 +1870,39 @@ function drawRuler() {
   const scrollLeft = viewScrollLeft;
   const timeLeft = scrollLeft / pxPerSec;
   const timeRight = (scrollLeft + width) / pxPerSec;
-  const firstTick = Math.max(0, Math.floor(timeLeft / interval)) * interval;
 
   ctx.strokeStyle = 'rgba(230, 232, 235, 0.35)';
   ctx.fillStyle = 'rgba(230, 232, 235, 0.75)';
   ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textBaseline = 'top';
 
-  for (let t = firstTick; t <= timeRight + interval; t += interval) {
-    const x = t * pxPerSec - scrollLeft;
-    ctx.beginPath();
-    ctx.moveTo(x, height - 6);
-    ctx.lineTo(x, height);
-    ctx.stroke();
-    ctx.fillText(fmtRuler(t, interval), x + 3, 1);
+  if (interval < 1) {
+    // Zoomed in past 1s: label whole seconds only (no "01:52.500" ms labels)
+    // and mark the halfway point of each second with a small dot instead.
+    const firstSec = Math.max(0, Math.floor(timeLeft));
+    for (let s = firstSec; s <= timeRight + 1; s++) {
+      const x = s * pxPerSec - scrollLeft;
+      ctx.beginPath();
+      ctx.moveTo(x, height - 6);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.fillText(fmtRuler(s), x + 3, 1);
+
+      const midX = (s + 0.5) * pxPerSec - scrollLeft;
+      ctx.beginPath();
+      ctx.arc(midX, height - 3, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    const firstTick = Math.max(0, Math.floor(timeLeft / interval)) * interval;
+    for (let t = firstTick; t <= timeRight + interval; t += interval) {
+      const x = t * pxPerSec - scrollLeft;
+      ctx.beginPath();
+      ctx.moveTo(x, height - 6);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.fillText(fmtRuler(t), x + 3, 1);
+    }
   }
 }
 
@@ -1816,6 +2085,7 @@ const clipModalRange = document.getElementById('clip-modal-range');
 const clipModalPlayhead = document.getElementById('clip-modal-playhead');
 const clipModalSelection = document.getElementById('clip-modal-selection');
 const clipModalWaveform = document.getElementById('clip-modal-waveform');
+const clipModalCaptionsTrack = document.getElementById('clip-modal-captions-track');
 const clipModalRulerCanvas = document.getElementById('clip-modal-ruler-canvas');
 const clipModalCaptionsOverlay = document.getElementById('clip-modal-captions-overlay');
 const clipModalPlayBtn = document.getElementById('clip-modal-playpause');
@@ -1842,6 +2112,7 @@ const clipSilenceBtn = document.getElementById('clip-silence-btn');
 const clipModalTitleEl = document.getElementById('clip-modal-title');
 const clipModalNumEl = document.getElementById('clip-modal-num');
 const clipModalCaptionsSwitch = document.getElementById('clip-modal-captions-switch');
+const clipModalSubtitleOptions = document.getElementById('clip-modal-subtitle-options');
 clipModalCaptionsSwitch.addEventListener('click', () => {
   if (!clipEditor) return;
   const h = clipEditor.h;
@@ -1856,6 +2127,31 @@ const clipModalFontGrid = document.getElementById('clip-modal-font-grid');
 clipModalFontGrid.addEventListener('click', e => {
   if (!clipEditor || !e.target.classList.contains('style-chip')) return;
   setFont(clipEditor.h, e.target.dataset.font);
+});
+const clipModalStyleGrid = document.getElementById('clip-modal-style-grid');
+clipModalStyleGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setCaptionStyle(clipEditor.h, e.target.dataset.style);
+});
+const clipModalColorGrid = document.getElementById('clip-modal-color-grid');
+clipModalColorGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setCaptionColor(clipEditor.h, e.target.dataset.color);
+});
+const clipModalSizeGrid = document.getElementById('clip-modal-size-grid');
+clipModalSizeGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setCaptionSize(clipEditor.h, e.target.dataset.size);
+});
+const clipModalPositionGrid = document.getElementById('clip-modal-position-grid');
+clipModalPositionGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setCaptionPosition(clipEditor.h, e.target.dataset.position);
+});
+const clipModalWordsGrid = document.getElementById('clip-modal-words-grid');
+clipModalWordsGrid.addEventListener('click', e => {
+  if (!clipEditor || !e.target.classList.contains('style-chip')) return;
+  setCaptionWords(clipEditor.h, parseInt(e.target.dataset.words, 10));
 });
 // Applies clipEditor.h.speed to the <video> element and turns on the
 // browser's built-in pitch-correction flag (vendor-prefixed variants for
@@ -1921,6 +2217,7 @@ function openClipEditor(h) {
   clipModalVideo.currentTime = h.start_time;
   clipModalPlayTime.textContent = `0:00 / ${fmtShort(h.end_time - h.start_time)}`;
   clipModalCaptionsSwitch.classList.toggle('on', h.captions_enabled !== false);
+  clipModalSubtitleOptions.style.display = h.captions_enabled !== false ? '' : 'none';
   clipModalSpeedGrid.querySelectorAll('.style-chip').forEach(chip => {
     chip.classList.toggle('active', parseFloat(chip.dataset.speed) === (h.speed || 1.0));
   });
@@ -1929,6 +2226,23 @@ function openClipEditor(h) {
     chip.classList.toggle('active', chip.dataset.font === (h.font || 'extrabold'));
   });
   applyClipCaptionFont();
+  clipModalStyleGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.style === (h.caption_style || 'karaoke'));
+  });
+  clipModalColorGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.color === (h.caption_color || 'auto'));
+  });
+  clipModalSizeGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.size === (h.caption_size || 'm'));
+  });
+  clipModalCaptionsOverlay.style.fontSize = CLIP_CAPTION_SIZE_PREVIEW[h.caption_size || 'm'] || CLIP_CAPTION_SIZE_PREVIEW.m;
+  clipModalPositionGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.position === (h.caption_position || 'bottom'));
+  });
+  applyClipCaptionPosition();
+  clipModalWordsGrid.querySelectorAll('.style-chip').forEach(chip => {
+    chip.classList.toggle('active', parseInt(chip.dataset.words, 10) === (h.caption_words || 1));
+  });
   clipModalCaptionsOverlay.classList.remove('visible');
   clipModalOverlay.classList.add('open');
   video.pause();
@@ -1979,6 +2293,39 @@ clipModalEl.addEventListener('transitionend', (e) => {
     renderClipCropBox();
     drawClipCropPreview();
   }
+});
+
+// Draggable divider to grow/shrink the caption timing track's height (the
+// row of word/phrase blocks under the waveform) — separate from horizontal
+// zoom, since narrow blocks are short in *time*, not scale, so zooming in
+// doesn't make short captions any taller/more legible.
+const clipModalCaptionsResizeHandle = document.getElementById('clip-modal-captions-resize-handle');
+const CLIP_TIMELINE_TRACK_H = 64; // fixed height of the waveform+scrub track above the captions band
+let clipCaptionsTrackHeight = 32;
+try { clipCaptionsTrackHeight = parseFloat(localStorage.getItem('clipCaptionsTrackHeight')) || 32; } catch (e) {}
+function applyClipCaptionsTrackHeight() {
+  clipModalCaptionsTrack.style.height = clipCaptionsTrackHeight + 'px';
+  clipModalTimelineEl.style.height = (CLIP_TIMELINE_TRACK_H + clipCaptionsTrackHeight) + 'px';
+}
+applyClipCaptionsTrackHeight();
+clipModalCaptionsResizeHandle.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const startY = e.clientY;
+  const startH = clipCaptionsTrackHeight;
+  clipModalCaptionsResizeHandle.classList.add('dragging');
+  const onMove = (ev) => {
+    const delta = ev.clientY - startY;
+    clipCaptionsTrackHeight = Math.max(20, Math.min(160, startH + delta));
+    applyClipCaptionsTrackHeight();
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    clipModalCaptionsResizeHandle.classList.remove('dragging');
+    try { localStorage.setItem('clipCaptionsTrackHeight', String(clipCaptionsTrackHeight)); } catch (e) {}
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
 });
 
 // Draggable divider between the video block and the transcript panel. Only
@@ -2067,6 +2414,46 @@ clipModalCropResizeHandle.addEventListener('mousedown', (e) => {
 // clip-editor modal, synced to clipModalVideo playback.
 const CAPTIONS_COLOR_OTHER = '#FFB020'; // matches COLOR_AMBER in subtitles.py
 
+// Same stable-key criterion as editor_server._word_key / subtitles._time_key:
+// keyed off a word's original, never-rewritten Whisper timestamps, so an
+// override keeps matching its word across repeated edits and re-groupings.
+function _timeKey(a, b) {
+  return `${Math.round(a * 1000) / 1000}:${Math.round(b * 1000) / 1000}`;
+}
+
+// Applies h.caption_time_overrides (absolute timestamps) onto an already
+// clip-relative `words` array in place, mirroring subtitles.words_for_window's
+// override merge so the live preview matches what the final burn will do.
+function applyCaptionTimeOverrides(h, words) {
+  const overrides = h.caption_time_overrides;
+  if (!overrides || !overrides.length) return;
+  const byKey = {};
+  overrides.forEach(o => { byKey[_timeKey(o.word_start, o.word_end)] = o; });
+  words.forEach(w => {
+    const o = byKey[_timeKey(w.word_start, w.word_end)];
+    if (o) {
+      w.start = Math.max(0, o.start - h.start_time);
+      w.end = Math.max(0, Math.min(o.end, h.end_time) - h.start_time);
+    }
+  });
+}
+
+// Partitions captionWords into the same discrete, non-overlapping groups the
+// "Palabras a la vez" preview shows as a sliding window — one draggable block
+// per group, matching Premiere's caption-block model the user asked for.
+function getCaptionBlocks() {
+  if (!clipEditor || !clipEditor.captionWords) return [];
+  const words = clipEditor.captionWords;
+  const size = clipEditor.h.caption_words || 1;
+  const blocks = [];
+  for (let i = 0; i < words.length; i += size) {
+    const group = words.slice(i, i + size);
+    if (!group.length) continue;
+    blocks.push({ words: group, start: group[0].start, end: group[group.length - 1].end });
+  }
+  return blocks;
+}
+
 async function loadClipCaptions(h) {
   const editorAtRequest = clipEditor;
   clipModalTranscriptEl.textContent = 'Cargando transcripción…';
@@ -2075,8 +2462,10 @@ async function loadClipCaptions(h) {
     const data = await res.json();
     if (clipEditor !== editorAtRequest) return; // modal moved on to another clip
     clipEditor.captionWords = data.words || [];
+    applyCaptionTimeOverrides(h, clipEditor.captionWords);
     updateClipCaptionsOverlay();
     renderClipTranscript();
+    renderCaptionBlocks();
   } catch (err) {
     console.error('[editor] failed to load captions_range', err);
     clipModalTranscriptEl.textContent = 'No se pudo cargar la transcripción.';
@@ -2244,13 +2633,62 @@ function updateClipCaptionsOverlay() {
   const t = clipModalVideo.currentTime - clipEditor.h.start_time;
   // Skip emptied words entirely (mirrors build_ass, which drops blank text) so
   // the live preview shows the same silent gap the final render will have.
-  const word = clipEditor.captionWords.find(w => t >= w.start && t < w.end && w.word.trim());
-  if (!word) {
+  const words = clipEditor.captionWords;
+  const idx = words.findIndex(w => t >= w.start && t < w.end && w.word.trim());
+  if (idx < 0) {
     clipModalCaptionsOverlay.classList.remove('visible');
     return;
   }
-  clipModalCaptionsOverlay.textContent = word.word.trim();
-  clipModalCaptionsOverlay.style.color = word.speaker === 'OTHER' ? CAPTIONS_COLOR_OTHER : '#fff';
+  const word = words[idx];
+  const h = clipEditor.h;
+  const colorKey = h.caption_color || 'auto';
+  const fixedColor = CLIP_CAPTION_COLOR_PREVIEW[colorKey];
+  const activeColor = fixedColor || (word.speaker === 'OTHER' ? CAPTIONS_COLOR_OTHER : '#fff');
+  const style = h.caption_style || 'karaoke';
+  const wordsPerGroup = h.caption_words || 1;
+
+  clipModalCaptionsOverlay.innerHTML = '';
+  // Wrap the rendered words in their own inline-block so a "bold" background
+  // hugs just the text (matches the ASS BorderStyle=3 box in the real burn)
+  // instead of stretching across the whole overlay, which spans 84% of the
+  // video width for centering purposes.
+  const wrap = document.createElement('span');
+  wrap.style.display = 'inline-block';
+  // Show the whole group of words together (not built up one at a time): words
+  // before/after the active one in its group are dimmed, and the active one
+  // gets painted as time passes over it — mirrors build_ass in subtitles.py.
+  const groupSize = wordsPerGroup > 0 ? wordsPerGroup : 1;
+  const groupStart = Math.floor(idx / groupSize) * groupSize;
+  const before = words.slice(groupStart, idx).filter(w => w.word.trim());
+  const after = words.slice(idx + 1, groupStart + groupSize).filter(w => w.word.trim());
+  if (before.length) {
+    const beforeSpan = document.createElement('span');
+    beforeSpan.style.opacity = '0.5';
+    beforeSpan.style.color = activeColor;
+    beforeSpan.textContent = before.map(w => w.word.trim()).join(' ') + ' ';
+    wrap.appendChild(beforeSpan);
+  }
+  const activeSpan = document.createElement('span');
+  activeSpan.style.color = activeColor;
+  activeSpan.textContent = word.word.trim();
+  if (style === 'highlight') activeSpan.style.display = 'inline-block';
+  if (style === 'highlight') activeSpan.style.transform = 'scale(1.15)';
+  wrap.appendChild(activeSpan);
+  if (after.length) {
+    const afterSpan = document.createElement('span');
+    afterSpan.style.opacity = '0.5';
+    afterSpan.style.color = activeColor;
+    afterSpan.textContent = ' ' + after.map(w => w.word.trim()).join(' ');
+    wrap.appendChild(afterSpan);
+  }
+  clipModalCaptionsOverlay.appendChild(wrap);
+
+  wrap.style.background = style === 'bold' ? 'rgba(0,0,0,.5)' : '';
+  wrap.style.padding = style === 'bold' ? '4px 14px' : '';
+  wrap.style.borderRadius = style === 'bold' ? '8px' : '';
+  clipModalCaptionsOverlay.style.textShadow = style === 'minimal'
+    ? '0 0 2px rgba(0,0,0,.6)'
+    : '0 0 6px rgba(0,0,0,.85), 0 0 2px rgba(0,0,0,.9)';
   clipModalCaptionsOverlay.classList.add('visible');
 }
 
@@ -2430,6 +2868,46 @@ function renderClipRange() {
     });
     clipModalTrack.appendChild(el);
   });
+
+  renderCaptionBlocks();
+}
+
+// Renders the Premiere-style caption timing lane: one draggable block per
+// getCaptionBlocks() group, positioned with the exact same clipPct(winStart,
+// winEnd) formula as the range box/waveform above it, so it never drifts out
+// of alignment with them (see feedback_timeline_single_source_of_truth).
+function renderCaptionBlocks() {
+  if (!clipEditor) return;
+  clipModalCaptionsTrack.innerHTML = '';
+  const { winStart, winEnd } = clipEditor;
+  const startTime = clipEditor.h.start_time;
+  const blocks = getCaptionBlocks();
+  blocks.forEach((block, idx) => {
+    const el = document.createElement('div');
+    el.className = 'caption-block';
+    // block.start/end are clip-relative (same axis as captionWords); winStart/winEnd
+    // are absolute source time, so convert before sharing clipPct with the waveform.
+    const left = clipPct(block.start + startTime, winStart, winEnd);
+    const right = clipPct(block.end + startTime, winStart, winEnd);
+    el.style.left = left + '%';
+    el.style.width = Math.max(0.3, right - left) + '%';
+    el.textContent = block.words.map(w => w.word.trim()).join(' ');
+    el.title = el.textContent;
+
+    const leftHandle = document.createElement('div');
+    leftHandle.className = 'caption-block-handle left';
+    leftHandle.addEventListener('mousedown', e => startCaptionDrag(e, idx, 'resize-left'));
+    const rightHandle = document.createElement('div');
+    rightHandle.className = 'caption-block-handle right';
+    rightHandle.addEventListener('mousedown', e => startCaptionDrag(e, idx, 'resize-right'));
+    el.addEventListener('mousedown', e => {
+      if (e.target === leftHandle || e.target === rightHandle) return;
+      startCaptionDrag(e, idx, 'move');
+    });
+    el.appendChild(leftHandle);
+    el.appendChild(rightHandle);
+    clipModalCaptionsTrack.appendChild(el);
+  });
 }
 
 function drawClipRuler() {
@@ -2448,20 +2926,39 @@ function drawClipRuler() {
   if (span <= 0) return;
   const pxPerSec = width / span;
   const interval = niceRulerInterval(pxPerSec);
-  const firstTick = Math.max(0, Math.floor(winStart / interval)) * interval;
 
   ctx.strokeStyle = 'rgba(230, 232, 235, 0.35)';
   ctx.fillStyle = 'rgba(230, 232, 235, 0.75)';
   ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textBaseline = 'top';
 
-  for (let t = firstTick; t <= winEnd + interval; t += interval) {
-    const x = (t - winStart) * pxPerSec;
-    ctx.beginPath();
-    ctx.moveTo(x, height - 6);
-    ctx.lineTo(x, height);
-    ctx.stroke();
-    ctx.fillText(fmtRuler(t, interval), x + 3, 1);
+  if (interval < 1) {
+    // Zoomed in past 1s: label whole seconds only (no "01:52.500" ms labels)
+    // and mark the halfway point of each second with a small dot instead.
+    const firstSec = Math.max(0, Math.floor(winStart));
+    for (let s = firstSec; s <= winEnd + 1; s++) {
+      const x = (s - winStart) * pxPerSec;
+      ctx.beginPath();
+      ctx.moveTo(x, height - 6);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.fillText(fmtRuler(s), x + 3, 1);
+
+      const midX = (s + 0.5 - winStart) * pxPerSec;
+      ctx.beginPath();
+      ctx.arc(midX, height - 3, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    const firstTick = Math.max(0, Math.floor(winStart / interval)) * interval;
+    for (let t = firstTick; t <= winEnd + interval; t += interval) {
+      const x = (t - winStart) * pxPerSec;
+      ctx.beginPath();
+      ctx.moveTo(x, height - 6);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.fillText(fmtRuler(t), x + 3, 1);
+    }
   }
 
   if (clipEditor.crop && clipEditor.crop.enabled && clipEditor.crop.keyframes.length) {
@@ -2847,6 +3344,144 @@ function endClipSelectionDrag() {
     clipJustSelected = true;
     setTimeout(() => { clipJustSelected = false; }, 0);
   }
+}
+
+// Premiere-style caption block drag: left/right handles stretch the in/out
+// time (proportionally remapping the words inside so the internal
+// karaoke-style word timing scales along), body drag moves the whole block
+// without changing its duration. Mirrors startClipTrim/onClipTrimDrag's
+// mechanics (mousedown -> window mousemove/mouseup -> cheap re-render each
+// move -> persist once on mouseup), but per-block instead of per-clip-edge.
+let clipCaptionDragging = null;
+const CAPTION_MIN_DUR = 0.05;
+
+function startCaptionDrag(e, idx, mode) {
+  if (!clipEditor) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const blocks = getCaptionBlocks();
+  const block = blocks[idx];
+  if (!block) return;
+  const prev = idx > 0 ? blocks[idx - 1] : null;
+  const next = idx < blocks.length - 1 ? blocks[idx + 1] : null;
+  const clipDur = clipEditor.h.end_time - clipEditor.h.start_time;
+  clipCaptionDragging = {
+    mode,
+    // clipTimeFromEvent returns absolute source time; block.start/end below are
+    // clip-relative, so bring the anchor onto that same axis up front.
+    anchorTime: clipTimeFromEvent(e) - clipEditor.h.start_time,
+    origBlockStart: block.start,
+    origBlockEnd: block.end,
+    words: block.words.map(w => ({ ref: w, origStart: w.start, origEnd: w.end })),
+    // Words are usually spoken back-to-back with no silence between them, so
+    // the immediate neighbor's shared edge is almost always exactly this
+    // block's own edge (contiguous). Only clamping to that shared edge (as a
+    // hard wall) would make every drag a no-op in the common case. Instead,
+    // capture the neighbor's own words too so a drag that pushes past the
+    // shared edge "ripples" into it — shrinking it from that side, down to
+    // CAPTION_MIN_DUR — same as Premiere's roll edit between adjacent clips.
+    prevBlockStart: prev ? prev.start : 0,
+    prevBlockEnd: prev ? prev.end : 0,
+    prevBlockWords: prev ? prev.words.map(w => ({ ref: w, origStart: w.start, origEnd: w.end })) : null,
+    nextBlockStart: next ? next.start : clipDur,
+    nextBlockEnd: next ? next.end : clipDur,
+    nextBlockWords: next ? next.words.map(w => ({ ref: w, origStart: w.start, origEnd: w.end })) : null,
+    clipDur,
+  };
+  window.addEventListener('mousemove', onCaptionDrag);
+  window.addEventListener('mouseup', endCaptionDrag);
+}
+
+// Remaps a block's words from their captured [oldStart, oldEnd] span onto a
+// new [newStart, newEnd] span, preserving each word's relative position
+// (same proportional stretch used for the dragged block itself).
+function _remapBlockWords(entries, oldStart, oldEnd, newStart, newEnd) {
+  const span = (oldEnd - oldStart) || CAPTION_MIN_DUR;
+  entries.forEach(({ ref, origStart, origEnd }) => {
+    ref.start = newStart + ((origStart - oldStart) / span) * (newEnd - newStart);
+    ref.end = newStart + ((origEnd - oldStart) / span) * (newEnd - newStart);
+  });
+}
+
+function onCaptionDrag(e) {
+  const drag = clipCaptionDragging;
+  if (!drag || !clipEditor) return;
+  const t = clipTimeFromEvent(e) - clipEditor.h.start_time;
+  const { origBlockStart: oldStart, origBlockEnd: oldEnd, words } = drag;
+
+  if (drag.mode === 'resize-left') {
+    const floor = drag.prevBlockWords ? drag.prevBlockStart + CAPTION_MIN_DUR : 0;
+    const L = Math.max(floor, Math.min(t, oldEnd - CAPTION_MIN_DUR));
+    _remapBlockWords(words, oldStart, oldEnd, L, oldEnd);
+    if (drag.prevBlockWords) {
+      const newPrevEnd = Math.min(L, drag.prevBlockEnd);
+      _remapBlockWords(drag.prevBlockWords, drag.prevBlockStart, drag.prevBlockEnd, drag.prevBlockStart, newPrevEnd);
+    }
+  } else if (drag.mode === 'resize-right') {
+    const ceiling = drag.nextBlockWords ? drag.nextBlockEnd - CAPTION_MIN_DUR : drag.clipDur;
+    const R = Math.min(ceiling, Math.max(t, oldStart + CAPTION_MIN_DUR));
+    _remapBlockWords(words, oldStart, oldEnd, oldStart, R);
+    if (drag.nextBlockWords) {
+      const newNextStart = Math.max(R, drag.nextBlockStart);
+      _remapBlockWords(drag.nextBlockWords, drag.nextBlockStart, drag.nextBlockEnd, newNextStart, drag.nextBlockEnd);
+    }
+  } else {
+    const floor = (drag.prevBlockWords ? drag.prevBlockStart + CAPTION_MIN_DUR : 0) - oldStart;
+    const ceiling = (drag.nextBlockWords ? drag.nextBlockEnd - CAPTION_MIN_DUR : drag.clipDur) - oldEnd;
+    const delta = Math.max(floor, Math.min(t - drag.anchorTime, ceiling));
+    words.forEach(({ ref, origStart, origEnd }) => {
+      ref.start = origStart + delta;
+      ref.end = origEnd + delta;
+    });
+    if (drag.prevBlockWords) {
+      const newPrevEnd = Math.min(oldStart + delta, drag.prevBlockEnd);
+      _remapBlockWords(drag.prevBlockWords, drag.prevBlockStart, drag.prevBlockEnd, drag.prevBlockStart, newPrevEnd);
+    }
+    if (drag.nextBlockWords) {
+      const newNextStart = Math.max(oldEnd + delta, drag.nextBlockStart);
+      _remapBlockWords(drag.nextBlockWords, drag.nextBlockStart, drag.nextBlockEnd, newNextStart, drag.nextBlockEnd);
+    }
+  }
+  renderCaptionBlocks();
+  updateClipCaptionsOverlay();
+}
+
+function endCaptionDrag() {
+  if (!clipCaptionDragging) return;
+  clipCaptionDragging = null;
+  window.removeEventListener('mousemove', onCaptionDrag);
+  window.removeEventListener('mouseup', endCaptionDrag);
+  saveCaptionTimeOverrides();
+}
+
+// Rebuilds caption_time_overrides from scratch by diffing every word's
+// current (possibly dragged) start/end against its original Whisper timing
+// (word_start/word_end, never rewritten — the stable key), so this stays
+// correct no matter how many blocks were dragged or how "Palabras a la vez"
+// regrouped them since the last save.
+function saveCaptionTimeOverrides() {
+  if (!clipEditor) return;
+  const h = clipEditor.h;
+  const words = clipEditor.captionWords || [];
+  const overrides = [];
+  words.forEach(w => {
+    const origStart = w.word_start - h.start_time;
+    const origEnd = w.word_end - h.start_time;
+    if (Math.abs(w.start - origStart) > 0.001 || Math.abs(w.end - origEnd) > 0.001) {
+      overrides.push({
+        word_start: w.word_start,
+        word_end: w.word_end,
+        start: h.start_time + w.start,
+        end: h.start_time + w.end,
+      });
+    }
+  });
+  h.caption_time_overrides = overrides;
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ caption_time_overrides: overrides }),
+  }).catch(err => console.error('[editor] failed to save caption time overrides', err));
 }
 
 clipModalTrack.addEventListener('click', e => {
