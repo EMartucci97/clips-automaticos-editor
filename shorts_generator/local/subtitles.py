@@ -185,6 +185,50 @@ def _style_for_speaker(speaker: str) -> str:
     return STYLE_OTHER if speaker == OTHER_LABEL else STYLE_ROBERTO
 
 
+_DANGLING_CONNECTORS = {
+    "y", "o", "u", "e", "ni", "que", "pero", "porque", "aunque",
+    "pues", "sino", "cuando", "mientras", "si",
+}
+
+
+def _group_boundaries(words: List[Dict], words_per_group: int) -> List[tuple]:
+    """Decide caption-group boundaries from natural speech pauses instead of
+    a fixed word-count stride: always break at sentence-ending punctuation,
+    and at a comma/semicolon/colon once the group has reached
+    `words_per_group` words. A hard cap (`words_per_group + 2`) forces a
+    break even without punctuation, so a long clause with no pause doesn't
+    grow into one giant caption — but if the word landing on that cap is a
+    connector ("y", "que", ...), it reads better opening the next caption
+    than dangling at the end of this one, so the break moves one word
+    earlier instead."""
+    if words_per_group <= 1:
+        return [(i, i + 1) for i in range(len(words))]
+
+    hard_max = words_per_group + 2
+    groups = []
+    start = 0
+    for i, w in enumerate(words):
+        text = (w.get("word") or "").rstrip()
+        size = i - start + 1
+        if text.endswith((".", "!", "?", "…")):
+            groups.append((start, i + 1))
+            start = i + 1
+        elif size >= words_per_group and text.endswith((",", ";", ":")):
+            groups.append((start, i + 1))
+            start = i + 1
+        elif size >= hard_max:
+            bare = text.strip(".,;:!?…").lower()
+            if bare in _DANGLING_CONNECTORS and size > 1:
+                groups.append((start, i))
+                start = i
+            else:
+                groups.append((start, i + 1))
+                start = i + 1
+    if start < len(words):
+        groups.append((start, len(words)))
+    return groups
+
+
 def build_ass(
     words: List[Dict],
     out_path: str,
@@ -198,6 +242,11 @@ def build_ass(
 ) -> str:
     lines = [_ass_header(font_name, size=size, position=position, style=style, color=color)]
     fixed_style = color != DEFAULT_CAPTION_COLOR
+    group_for_index: Dict[int, tuple] = {}
+    if words_per_group > 1:
+        for g_start, g_end in _group_boundaries(words, words_per_group):
+            for idx in range(g_start, g_end):
+                group_for_index[idx] = (g_start, g_end)
     for i, w in enumerate(words):
         text = w["word"].replace("\n", " ").strip()
         if not text:
@@ -210,14 +259,14 @@ def build_ass(
             # Show the whole group of words together (not built up one at a time):
             # words before/after the active one in its group are dimmed, and the
             # active one gets painted as time passes over it.
-            group_start = (i // words_per_group) * words_per_group
+            group_start, group_end = group_for_index[i]
             before_text = " ".join(
                 c["word"].replace("\n", " ").strip()
                 for c in words[group_start:i] if c["word"].strip()
             )
             after_text = " ".join(
                 c["word"].replace("\n", " ").strip()
-                for c in words[i + 1:group_start + words_per_group] if c["word"].strip()
+                for c in words[i + 1:group_end] if c["word"].strip()
             )
             # Each segment resets its own alpha/scale explicitly (rather than
             # relying on tag order) so the active word's highlight scale never

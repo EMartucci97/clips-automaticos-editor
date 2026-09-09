@@ -156,6 +156,7 @@
     border: 1px solid var(--marker-color, var(--accent));
     border-radius: 4px;
     min-width: 4px;
+    overflow: hidden;
   }
   .marker:hover { background: color-mix(in srgb, var(--marker-color, var(--accent)) 80%, transparent); }
   .marker.selected { outline: 2px solid #fff; outline-offset: 1px; }
@@ -2439,6 +2440,48 @@ function applyCaptionTimeOverrides(h, words) {
   });
 }
 
+const CAPTION_DANGLING_CONNECTORS = new Set([
+  'y', 'o', 'u', 'e', 'ni', 'que', 'pero', 'porque', 'aunque',
+  'pues', 'sino', 'cuando', 'mientras', 'si',
+]);
+
+// Decides caption-group boundaries from natural speech pauses instead of a
+// fixed word-count stride, mirroring _group_boundaries in subtitles.py:
+// always break at sentence-ending punctuation, and at a comma/semicolon/colon
+// once the group has reached `size` words. A hard cap (size + 2) forces a
+// break even without punctuation, so a long clause with no pause doesn't grow
+// into one giant caption — but if the word landing on that cap is a
+// connector ("y", "que", ...), it reads better opening the next caption than
+// dangling at the end of this one, so the break moves one word earlier.
+function groupCaptionBoundaries(words, size) {
+  if (size <= 1) return words.map((_, i) => [i, i + 1]);
+  const hardMax = size + 2;
+  const groups = [];
+  let start = 0;
+  for (let i = 0; i < words.length; i++) {
+    const text = (words[i].word || '').replace(/\s+$/, '');
+    const groupSize = i - start + 1;
+    if (/[.!?…]$/.test(text)) {
+      groups.push([start, i + 1]);
+      start = i + 1;
+    } else if (groupSize >= size && /[,;:]$/.test(text)) {
+      groups.push([start, i + 1]);
+      start = i + 1;
+    } else if (groupSize >= hardMax) {
+      const bare = text.replace(/[.,;:!?…]+$/, '').toLowerCase();
+      if (CAPTION_DANGLING_CONNECTORS.has(bare) && groupSize > 1) {
+        groups.push([start, i]);
+        start = i;
+      } else {
+        groups.push([start, i + 1]);
+        start = i + 1;
+      }
+    }
+  }
+  if (start < words.length) groups.push([start, words.length]);
+  return groups;
+}
+
 // Partitions captionWords into the same discrete, non-overlapping groups the
 // "Palabras a la vez" preview shows as a sliding window — one draggable block
 // per group, matching Premiere's caption-block model the user asked for.
@@ -2447,8 +2490,8 @@ function getCaptionBlocks() {
   const words = clipEditor.captionWords;
   const size = clipEditor.h.caption_words || 1;
   const blocks = [];
-  for (let i = 0; i < words.length; i += size) {
-    const group = words.slice(i, i + size);
+  for (const [start, end] of groupCaptionBoundaries(words, size)) {
+    const group = words.slice(start, end);
     if (!group.length) continue;
     blocks.push({ words: group, start: group[0].start, end: group[group.length - 1].end });
   }
@@ -2659,9 +2702,9 @@ function updateClipCaptionsOverlay() {
   // before/after the active one in its group are dimmed, and the active one
   // gets painted as time passes over it — mirrors build_ass in subtitles.py.
   const groupSize = wordsPerGroup > 0 ? wordsPerGroup : 1;
-  const groupStart = Math.floor(idx / groupSize) * groupSize;
+  const [groupStart, groupEnd] = groupCaptionBoundaries(words, groupSize).find(([s, e]) => idx >= s && idx < e) || [idx, idx + 1];
   const before = words.slice(groupStart, idx).filter(w => w.word.trim());
-  const after = words.slice(idx + 1, groupStart + groupSize).filter(w => w.word.trim());
+  const after = words.slice(idx + 1, groupEnd).filter(w => w.word.trim());
   if (before.length) {
     const beforeSpan = document.createElement('span');
     beforeSpan.style.opacity = '0.5';
