@@ -188,6 +188,7 @@ def _style_for_speaker(speaker: str) -> str:
 _DANGLING_CONNECTORS = {
     "y", "o", "u", "e", "ni", "que", "pero", "porque", "aunque",
     "pues", "sino", "cuando", "mientras", "si",
+    "la", "las", "el", "los", "un", "una", "unos", "unas", "lo",
 }
 
 
