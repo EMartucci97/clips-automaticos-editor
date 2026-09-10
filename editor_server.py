@@ -8,6 +8,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import threading
 import wave
 from pathlib import Path
@@ -131,9 +132,52 @@ def index():
     return send_file(Path(__file__).parent / "static" / "editor.html")
 
 
+_PREVIEW_LOCK = threading.Lock()
+
+
+def _preview_video_path(source_path: str) -> Path:
+    """Browser-playable proxy for the source video.
+
+    Chrome's <video> element cannot play `video/quicktime` at all
+    (canPlayType('video/quicktime') === '') and this project's sources are
+    10-bit HEVC .mov files, so serving SOURCE_PATH directly leaves the
+    element stuck at readyState 0 forever: loadedmetadata never fires,
+    the global `duration` stays 0, and every % computed from it in
+    editor.html (zoom window, cut markers, playhead) collapses to 0 —
+    cuts are detected and saved correctly but render invisibly at the
+    timeline's left edge. Transcoding once to 8-bit H.264/AAC MP4 (cached
+    next to the other per-video artifacts) fixes playback without
+    touching SOURCE_PATH, which everything else (detection, export)
+    keeps reading directly.
+    """
+    stem = Path(source_path).stem
+    preview_path = Path(LOCAL_OUTPUT_DIR) / f"{stem}.preview.mp4"
+    if preview_path.exists():
+        return preview_path
+    with _PREVIEW_LOCK:
+        if preview_path.exists():
+            return preview_path
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+        tmp_path = preview_path.with_name(preview_path.stem + ".tmp.mp4")
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", source_path,
+            "-c:v", "h264_videotoolbox", "-b:v", "8M",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(tmp_path),
+        ]
+        print(f"[editor] transcoding browser preview (one-time): {preview_path}", flush=True)
+        subprocess.run(cmd, check=True)
+        os.replace(tmp_path, preview_path)
+        print(f"[editor] preview ready: {preview_path}", flush=True)
+        return preview_path
+
+
 @app.route("/video")
 def video():
-    return send_file(SOURCE_PATH, conditional=True)
+    return send_file(_preview_video_path(SOURCE_PATH), conditional=True)
 
 
 def _waveform_cache_path(source_path: str) -> Path:
