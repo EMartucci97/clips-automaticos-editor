@@ -1455,6 +1455,7 @@ function setCaptionWords(h, wordsCount) {
     genericGridSetter(clipModalWordsGrid, 'words', wordsCount);
     updateClipCaptionsOverlay();
     renderCaptionBlocks();
+    loadCaptionGroups(h); // re-fetch real groups for the new size in the background
   }
   fetch(`/api/highlights/${h.id}`, {
     method: 'PATCH',
@@ -2490,8 +2491,16 @@ function getCaptionBlocks() {
   if (!clipEditor || !clipEditor.captionWords) return [];
   const words = clipEditor.captionWords;
   const size = clipEditor.h.caption_words || 1;
+  // Prefer the real groups from /api/caption_groups (same LLM coherent-phrase
+  // pass the final render uses) when we have them for this exact word count.
+  // groupCaptionBoundaries() is only the mechanical fallback -- this
+  // project's transcripts carry no punctuation, so left on its own it always
+  // degrades to a fixed-size hard cap and never shows true phrase grouping.
+  const boundaries = (clipEditor.captionGroups && clipEditor.captionGroupsForWords === size)
+    ? clipEditor.captionGroups
+    : groupCaptionBoundaries(words, size);
   const blocks = [];
-  for (const [start, end] of groupCaptionBoundaries(words, size)) {
+  for (const [start, end] of boundaries) {
     const group = words.slice(start, end);
     if (!group.length) continue;
     blocks.push({ words: group, start: group[0].start, end: group[group.length - 1].end });
@@ -2499,9 +2508,30 @@ function getCaptionBlocks() {
   return blocks;
 }
 
+async function loadCaptionGroups(h) {
+  const editorAtRequest = clipEditor;
+  const size = h.caption_words || 1;
+  try {
+    const res = await fetch(`/api/caption_groups?start=${h.start_time}&end=${h.end_time}&words=${size}`);
+    const data = await res.json();
+    if (clipEditor !== editorAtRequest || clipEditor.h !== h) return; // moved on
+    if ((h.caption_words || 1) !== size) return; // stale response for an old chip value
+    clipEditor.captionGroups = data.groups || null;
+    clipEditor.captionGroupsForWords = size;
+    updateClipCaptionsOverlay();
+    renderCaptionBlocks();
+  } catch (err) {
+    console.error('[editor] failed to load caption_groups', err);
+    // leave captionGroups unset -- getCaptionBlocks() falls back to the
+    // mechanical grouping rather than showing nothing.
+  }
+}
+
 async function loadClipCaptions(h) {
   const editorAtRequest = clipEditor;
   clipModalTranscriptEl.textContent = 'Cargando transcripción…';
+  clipEditor.captionGroups = null;
+  clipEditor.captionGroupsForWords = null;
   try {
     const res = await fetch(`/api/captions_range?start=${h.start_time}&end=${h.end_time}`);
     const data = await res.json();
@@ -2511,6 +2541,7 @@ async function loadClipCaptions(h) {
     updateClipCaptionsOverlay();
     renderClipTranscript();
     renderCaptionBlocks();
+    loadCaptionGroups(h);
   } catch (err) {
     console.error('[editor] failed to load captions_range', err);
     clipModalTranscriptEl.textContent = 'No se pudo cargar la transcripción.';

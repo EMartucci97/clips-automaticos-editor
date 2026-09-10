@@ -30,6 +30,7 @@ from shorts_generator.local.subtitles import (
     CAPTION_SIZES,
     CAPTION_STYLES,
     FONT_CHOICES,
+    _llm_group_words,
     words_for_window,
 )
 from shorts_generator.local.transcriber import transcribe_local
@@ -417,6 +418,33 @@ def api_captions_range():
     transcript = _get_diarized_transcript(SOURCE_PATH)
     words = words_for_window(transcript.get("segments", []), start, end)
     return jsonify({"words": words})
+
+
+@app.route("/api/caption_groups", methods=["GET"])
+def api_caption_groups():
+    """Real caption-box boundaries for the editor's live preview, computed
+    the same way the final render decides them (subtitles._llm_group_words:
+    an LLM pass that reads for coherent phrases), not the JS mechanical
+    fallback groupCaptionBoundaries() -- that fallback only breaks on
+    punctuation, and this project's transcripts carry none, so it always
+    degraded to a fixed-size hard cap and never actually showed phrase-level
+    grouping. Indices are into the same word list /api/captions_range
+    returns for this start/end (no LLM cleanup pass here), so the editor can
+    line group boundaries up with the words it already has."""
+    try:
+        start = float(request.args.get("start", 0))
+        end = float(request.args.get("end", 0))
+        words_per_group = int(request.args.get("words", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid start/end/words"}), 400
+
+    transcript = _get_diarized_transcript(SOURCE_PATH)
+    words = words_for_window(transcript.get("segments", []), start, end)
+    if words_per_group <= 1 or not words:
+        groups = [[i, i + 1] for i in range(len(words))]
+    else:
+        groups = [list(g) for g in _llm_group_words(words, words_per_group)]
+    return jsonify({"groups": groups})
 
 
 @app.route("/api/word_override", methods=["POST"])
