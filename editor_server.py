@@ -8,6 +8,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import subprocess
 import threading
 import wave
@@ -684,16 +685,80 @@ def api_analyze_full_video():
 
 SILENCE_MIN_GAP_SECONDS = 0.3
 SILENCE_PAD_SECONDS = 0.08
+SILENCE_NOISE_DB = "-30dB"
+
+_SILENCE_RE_START = re.compile(r"silence_start:\s*(-?[\d.]+)")
+_SILENCE_RE_END = re.compile(r"silence_end:\s*(-?[\d.]+)")
+
+
+def _audio_silences(start: float, end: float) -> list[dict]:
+    """Ground-truth silence intervals from the actual audio (ffmpeg
+    silencedetect), independent of Whisper's word timestamps.
+
+    Word-gap detection alone under-detects: Whisper's word boundaries are
+    often not tight around a pause — the silence gets absorbed into the
+    start/end of an adjacent word instead of showing up as a gap between
+    words (sometimes a whole pause ends up *inside* a single word's
+    timestamp span, e.g. a short filler word stretched to cover it) — so a
+    real pause well over SILENCE_MIN_GAP_SECONDS can show as a sub-threshold
+    or nonexistent word gap. Runs against the cached mono wav already
+    produced for diarization rather than the huge source .mov."""
+    wav_path = _extract_audio_wav(SOURCE_PATH)
+    duration = end - start
+    # -ss MUST come before -i: this seeks the input directly (fast, and
+    # resets the filter's timestamps to start at 0 at the seek point). If
+    # -ss is placed after -i instead, ffmpeg decodes the *entire* file from
+    # t=0 to get an accurate seek, and silencedetect logs true source-
+    # absolute timestamps rather than timestamps relative to `start` — a
+    # previous version of this code assumed the latter and added `start` to
+    # already-absolute values, which shifted every real silence out of the
+    # window (dropped by clamping) while coincidentally shifting unrelated
+    # silences from near the start of the file into the window as bogus cuts.
+    cmd = [
+        "ffmpeg", "-nostats", "-ss", str(start), "-i", wav_path,
+        "-t", str(duration),
+        "-af", f"silencedetect=noise={SILENCE_NOISE_DB}:d={SILENCE_MIN_GAP_SECONDS}",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    stderr = result.stderr
+
+    intervals = []
+    pending_start = None
+    for line in stderr.splitlines():
+        m_start = _SILENCE_RE_START.search(line)
+        if m_start:
+            pending_start = float(m_start.group(1))
+            continue
+        m_end = _SILENCE_RE_END.search(line)
+        if m_end and pending_start is not None:
+            s = start + max(0.0, pending_start)
+            e = start + float(m_end.group(1))
+            intervals.append((max(start, s), min(end, e)))
+            pending_start = None
+    return intervals
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    intervals = sorted(intervals)
+    merged: list[list[float]] = []
+    for s, e in intervals:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
 
 
 @app.route("/api/detect_silences", methods=["GET"])
 def api_detect_silences():
-    """Word-level pause detection for the clip editor's 'quitar silencios'
-    tool. Reuses the same Whisper word timestamps already produced for
-    transcription/highlights instead of a separate audio-amplitude silence
-    pass — a gap between two spoken words within [start, end] longer than
-    SILENCE_MIN_GAP_SECONDS is a candidate cut, padded slightly on each side
-    so the cut doesn't clip the tail/head of adjacent speech."""
+    """Silence detection for the clip editor's 'quitar silencios' tool.
+
+    Unions two independent signals so neither one's blind spot becomes a
+    missed cut: Whisper word-timestamp gaps (cheap, usually fine) and
+    ffmpeg's actual audio silencedetect (ground truth, catches the pauses
+    Whisper's word boundaries swallow — see _audio_silences). Padded
+    slightly on each side so a cut doesn't clip the tail/head of speech."""
     try:
         start = float(request.args.get("start", 0))
         end = float(request.args.get("end", 0))
@@ -712,22 +777,25 @@ def api_detect_silences():
                 words.append(w)
     words.sort(key=lambda w: w["start"])
 
-    gaps = []
+    raw_intervals = []
     cursor = start
     for w in words:
         w_start = max(start, w["start"])
         if w_start - cursor >= SILENCE_MIN_GAP_SECONDS:
-            gaps.append({
-                "start_time": round(cursor + SILENCE_PAD_SECONDS, 2),
-                "end_time": round(w_start - SILENCE_PAD_SECONDS, 2),
-            })
+            raw_intervals.append((cursor, w_start))
         cursor = max(cursor, min(w["end"], end))
     if end - cursor >= SILENCE_MIN_GAP_SECONDS:
-        gaps.append({
-            "start_time": round(cursor + SILENCE_PAD_SECONDS, 2),
-            "end_time": round(end - SILENCE_PAD_SECONDS, 2),
-        })
+        raw_intervals.append((cursor, end))
 
+    try:
+        raw_intervals.extend(_audio_silences(start, end))
+    except Exception as exc:
+        print(f"[editor] audio silencedetect failed, using word gaps only: {exc}", flush=True)
+
+    gaps = [
+        {"start_time": round(s + SILENCE_PAD_SECONDS, 2), "end_time": round(e - SILENCE_PAD_SECONDS, 2)}
+        for s, e in _merge_intervals(raw_intervals)
+    ]
     gaps = [g for g in gaps if g["end_time"] - g["start_time"] > 0.05]
     return jsonify({"gaps": gaps})
 
