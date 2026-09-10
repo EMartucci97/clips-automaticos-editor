@@ -62,7 +62,12 @@ def _process_single_local(
     from .local.review import review_transcript
     from .local.subtitles import burn_subtitles, words_for_window
     from .local.transcriber import transcribe_local
-    from .config import LOCAL_DIARIZATION_ENABLED, LOCAL_SUBTITLES_ENABLED
+    from .config import (
+        LOCAL_DIARIZATION_ENABLED,
+        LOCAL_SUBTITLES_ENABLED,
+        LOCAL_TRIM_FILLERS_ENABLED,
+        LOCAL_TRIM_SILENCE_ENABLED,
+    )
 
     transcript = transcribe_local(source_path, language=language)
     if not transcript["segments"]:
@@ -84,16 +89,23 @@ def _process_single_local(
     top = sorted(all_highlights, key=lambda h: float(h.get("combined_score", h.get("score", 0))), reverse=True)[:num_clips]
     print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates", flush=True)
 
-    shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio)
+    shorts = crop_highlights_local(
+        source_path, top, aspect_ratio=aspect_ratio,
+        transcript_segments=transcript["segments"],
+        trim_silence=LOCAL_TRIM_SILENCE_ENABLED,
+        trim_fillers=LOCAL_TRIM_FILLERS_ENABLED,
+    )
 
     if LOCAL_SUBTITLES_ENABLED:
         for short in shorts:
             clip_path = short.get("clip_url")
             if not clip_path or not os.path.exists(clip_path):
                 continue
-            words = words_for_window(
-                transcript["segments"], float(short["start_time"]), float(short["end_time"])
-            )
+            words = short.get("words")
+            if words is None:
+                words = words_for_window(
+                    transcript["segments"], float(short["start_time"]), float(short["end_time"])
+                )
             print(f"[subtitles/local] burning {len(words)} words onto {clip_path}", flush=True)
             tmp_path = clip_path + ".subbed.mp4"
             try:

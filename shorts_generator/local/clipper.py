@@ -12,6 +12,7 @@ import subprocess
 from typing import Dict, List, Optional, Tuple, Union
 
 from ..config import LOCAL_OUTPUT_DIR
+from .editing import find_cut_segments, keep_segments_from_cuts, remap_words_across_cuts
 
 
 def _slugify(text: str, max_len: int = 60) -> str:
@@ -43,6 +44,51 @@ def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> s
         "-i", source_path,
         "-ss", f"{start:.3f}",
         "-to", f"{end:.3f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
+def _cut_subclip_multi(
+    source_path: str,
+    start: float,
+    end: float,
+    cut_segments: List[Tuple[float, float]],
+    out_path: str,
+) -> str:
+    """Like `_cut_subclip`, but also removes each (start, end) clip-relative
+    span in `cut_segments` (silence gaps / filler words -- see editing.py) in
+    one ffmpeg filter_complex trim+concat pass, instead of a plain -ss/-to
+    cut. Falls back to `_cut_subclip` when there's nothing left to cut after
+    merging, so unaffected callers see identical behaviour to before."""
+    duration = end - start
+    keep = keep_segments_from_cuts(cut_segments, duration)
+    if not keep or (len(keep) == 1 and keep[0][0] <= 1e-6 and keep[0][1] >= duration - 1e-6):
+        return _cut_subclip(source_path, start, end, out_path)
+
+    filter_parts = []
+    concat_inputs = []
+    for i, (s, e) in enumerate(keep):
+        abs_s, abs_e = start + s, start + e
+        filter_parts.append(
+            f"[0:v]trim=start={abs_s:.3f}:end={abs_e:.3f},setpts=PTS-STARTPTS[v{i}];"
+            f"[0:a]atrim=start={abs_s:.3f}:end={abs_e:.3f},asetpts=PTS-STARTPTS[a{i}];"
+        )
+        concat_inputs.append(f"[v{i}][a{i}]")
+    filter_complex = (
+        "".join(filter_parts)
+        + "".join(concat_inputs)
+        + f"concat=n={len(keep)}:v=1:a=1[outv][outa]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", source_path,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
@@ -269,16 +315,26 @@ def crop_clip_local(
     aspect_ratio: str,
     out_path: str,
     shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
+    cut_segments: Optional[List[Tuple[float, float]]] = None,
 ) -> str:
     """Cut + reframe one highlight, returning the local mp4 path.
 
     `shot_overrides`: optional {shot_index: track_id} map to force which
     face is treated as the speaker for specific camera shots (see
     `active_speaker.list_shots_for_review` to discover shot indices/track
-    ids for a given source_path/start_time/end_time before regenerating)."""
+    ids for a given source_path/start_time/end_time before regenerating).
+
+    `cut_segments`: optional list of (start, end) spans, clip-relative to
+    start_time, to remove from inside the highlight (silence gaps / filler
+    words -- see editing.py). When given, use
+    `editing.remap_words_across_cuts()` on the caption word list too, so
+    burned timestamps stay in sync with the shortened output."""
     cut_path = out_path + ".cut.mp4"
     try:
-        _cut_subclip(source_path, start_time, end_time, cut_path)
+        if cut_segments:
+            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, cut_path)
+        else:
+            _cut_subclip(source_path, start_time, end_time, cut_path)
         _reframe_vertical(cut_path, out_path, aspect_ratio, shot_overrides=shot_overrides)
     finally:
         if os.path.exists(cut_path):
@@ -447,7 +503,18 @@ def crop_highlights_local(
     highlights: List[Dict],
     aspect_ratio: str = "9:16",
     out_dir: Optional[str] = None,
+    transcript_segments: Optional[List[Dict]] = None,
+    trim_silence: bool = True,
+    trim_fillers: bool = True,
 ) -> List[Dict]:
+    """Crop each highlight into its own clip.
+
+    `transcript_segments`: optional full transcript (`transcript["segments"]`
+    from transcribe_local). When given, dead-air silences and/or LLM-flagged
+    filler words are cut out of each clip in the same ffmpeg pass (see
+    editing.py), and each result dict gets a `"words"` list already remapped
+    onto the shortened clip's timeline -- pass that straight to
+    `burn_subtitles()` instead of recomputing `words_for_window()`."""
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
     results: List[Dict] = []
@@ -462,15 +529,36 @@ def crop_highlights_local(
         used_names.add(filename)
         out_path = os.path.join(out_dir, filename)
         print(f"[clip/local] {i}/{len(highlights)}: {h.get('title', '(untitled)')}", flush=True)
+        start_time = float(h["start_time"])
+        end_time = float(h["end_time"])
+        cut_segments = None
+        remapped_words = None
+        if transcript_segments is not None and (trim_silence or trim_fillers):
+            from .subtitles import words_for_window
+            words = words_for_window(transcript_segments, start_time, end_time)
+            cut_segments = find_cut_segments(
+                words, end_time - start_time,
+                remove_silence=trim_silence, remove_fillers=trim_fillers,
+            )
+            if cut_segments:
+                print(f"[clip/local] {i}: trimming {len(cut_segments)} silence/filler span(s)", flush=True)
+                keep = keep_segments_from_cuts(cut_segments, end_time - start_time)
+                remapped_words = remap_words_across_cuts(words, keep)
+            else:
+                remapped_words = words
         try:
             crop_clip_local(
                 source_path,
-                float(h["start_time"]),
-                float(h["end_time"]),
+                start_time,
+                end_time,
                 aspect_ratio,
                 out_path,
+                cut_segments=cut_segments,
             )
-            results.append({**h, "clip_url": out_path})
+            result = {**h, "clip_url": out_path}
+            if remapped_words is not None:
+                result["words"] = remapped_words
+            results.append(result)
         except Exception as e:
             print(f"[clip/local] {i} failed: {e}", flush=True)
             results.append({**h, "clip_url": None, "error": str(e)})

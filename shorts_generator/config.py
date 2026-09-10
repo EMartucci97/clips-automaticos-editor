@@ -40,6 +40,13 @@ LOCAL_WHISPER_INITIAL_PROMPT = os.getenv(
 LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR", "output")
 LOCAL_SUBTITLES_ENABLED = os.getenv("LOCAL_SUBTITLES_ENABLED", "true").strip().lower() == "true"
 
+# Remove dead-air silences and LLM-flagged filler words ("eh", "este", etc.)
+# from inside each generated clip before burning captions. See
+# shorts_generator/local/editing.py. Disable either half independently if
+# one pass turns out too aggressive for a given show.
+LOCAL_TRIM_SILENCE_ENABLED = os.getenv("LOCAL_TRIM_SILENCE_ENABLED", "true").strip().lower() == "true"
+LOCAL_TRIM_FILLERS_ENABLED = os.getenv("LOCAL_TRIM_FILLERS_ENABLED", "true").strip().lower() == "true"
+
 # One extra LLM pass over the raw transcript, before highlight selection and
 # clipping, that catches likely Whisper mis-hearings (mainly acronyms losing
 # their first letter — "fore mexicana" instead of "AFORE mexicana"). See

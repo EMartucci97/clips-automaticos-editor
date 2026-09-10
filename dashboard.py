@@ -21,8 +21,12 @@ import os
 
 import streamlit as st
 
-from shorts_generator.config import LOCAL_OUTPUT_DIR
-from shorts_generator.local import active_speaker, clipper, subtitles, transcriber, two_camera
+from shorts_generator.config import (
+    LOCAL_OUTPUT_DIR,
+    LOCAL_TRIM_FILLERS_ENABLED,
+    LOCAL_TRIM_SILENCE_ENABLED,
+)
+from shorts_generator.local import active_speaker, clipper, editing, subtitles, transcriber, two_camera
 from shorts_generator.local.diarizer import diarize_and_label
 from shorts_generator.local.drive import (
     download_drive_file,
@@ -432,6 +436,15 @@ if job:
         burn_subs = st.checkbox(
             "Quemar subtítulos", value=bool(override.get("captions_enabled", True)), key=f"burn_subs_{job_key}",
         )
+        trim_cols = st.columns(2)
+        with trim_cols[0]:
+            trim_silence = st.checkbox(
+                "Recortar silencios", value=LOCAL_TRIM_SILENCE_ENABLED, key=f"trim_silence_{job_key}",
+            )
+        with trim_cols[1]:
+            trim_fillers = st.checkbox(
+                "Recortar muletillas", value=LOCAL_TRIM_FILLERS_ENABLED, key=f"trim_fillers_{job_key}",
+            )
 
         speed_default = float(override.get("speed", 1.0))
         speed_options = [1.0, 1.1, 1.2, 1.3]
@@ -574,6 +587,23 @@ if job:
 
         if st.button("2) Regenerar clip"):
             with st.spinner("Regenerando clip..."):
+                plain_reframe = not split_screen and reframe_mode != "2 cámaras fijas (diarización + zoom sutil)"
+                want_trim = plain_reframe and (trim_silence or trim_fillers)
+                cut_segments = None
+                words = None
+                if burn_subs or want_trim:
+                    transcript = transcriber.transcribe_local(job["source"])
+                    transcript = diarize_and_label(job["source"], transcript)
+                    _apply_transcript_overrides(transcript, _load_overrides(job["source"]))
+                    words = subtitles.words_for_window(
+                        transcript["segments"], job["start"], job["end"],
+                        time_overrides=override.get("caption_time_overrides"),
+                    )
+                    if want_trim:
+                        cut_segments = editing.find_cut_segments(
+                            words, job["end"] - job["start"],
+                            remove_silence=trim_silence, remove_fillers=trim_fillers,
+                        )
                 if split_screen:
                     clipper.crop_clip_split(
                         job["source"], job["start"], job["end"], aspect_ratio, out_path,
@@ -588,15 +618,12 @@ if job:
                     clipper.crop_clip_local(
                         job["source"], job["start"], job["end"], aspect_ratio, out_path,
                         shot_overrides=st.session_state.overrides or None,
+                        cut_segments=cut_segments,
                     )
                 if burn_subs:
-                    transcript = transcriber.transcribe_local(job["source"])
-                    transcript = diarize_and_label(job["source"], transcript)
-                    _apply_transcript_overrides(transcript, _load_overrides(job["source"]))
-                    words = subtitles.words_for_window(
-                        transcript["segments"], job["start"], job["end"],
-                        time_overrides=override.get("caption_time_overrides"),
-                    )
+                    if cut_segments:
+                        keep = editing.keep_segments_from_cuts(cut_segments, job["end"] - job["start"])
+                        words = editing.remap_words_across_cuts(words, keep)
                     tmp_subbed = out_path + ".subbed.mp4"
                     subtitles.burn_subtitles(
                         out_path, words, tmp_subbed,
@@ -750,8 +777,15 @@ with tab_generar:
             out_path = os.path.join(LOCAL_OUTPUT_DIR, filename)
             start, end = float(h["start_time"]), float(h["end_time"])
             if edited:
-                clipper.crop_clip_local(source_path, start, end, "9:16", out_path)
                 words = subtitles.words_for_window(transcript["segments"], start, end)
+                cut_segments = editing.find_cut_segments(
+                    words, end - start,
+                    remove_silence=LOCAL_TRIM_SILENCE_ENABLED, remove_fillers=LOCAL_TRIM_FILLERS_ENABLED,
+                )
+                clipper.crop_clip_local(source_path, start, end, "9:16", out_path, cut_segments=cut_segments)
+                if cut_segments:
+                    keep = editing.keep_segments_from_cuts(cut_segments, end - start)
+                    words = editing.remap_words_across_cuts(words, keep)
                 tmp_subbed = out_path + ".subbed.mp4"
                 subtitles.burn_subtitles(out_path, words, tmp_subbed)
                 os.replace(tmp_subbed, out_path)
