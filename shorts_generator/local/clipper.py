@@ -12,7 +12,13 @@ import subprocess
 from typing import Dict, List, Optional, Tuple, Union
 
 from ..config import LOCAL_OUTPUT_DIR
-from .editing import find_cut_segments, keep_segments_from_cuts, remap_words_across_cuts
+from .editing import (
+    _snap_forward,
+    find_cut_segments,
+    keep_segments_from_cuts,
+    remap_time,
+    remap_words_across_cuts,
+)
 
 
 def _slugify(text: str, max_len: int = 60) -> str:
@@ -117,6 +123,294 @@ def apply_speed_local(in_path: str, speed: float, out_path: str) -> str:
         out_path,
     ]
     subprocess.run(cmd, check=True)
+    return out_path
+
+
+def mix_background_music(in_path: str, music_path: str, volume: float, out_path: str,
+                          fade_seconds: float = 1.0) -> str:
+    """Loops `music_path` under in_path's existing audio via ffmpeg amix,
+    trimmed to in_path's duration with a short fade-in so the loop seam
+    doesn't click. No fade-out is applied at the end -- the music holds its
+    volume through the final frame instead of dipping down, per user
+    preference. Video stream is copied untouched; only audio is re-encoded.
+    `volume` is linear (0.0-1.0)."""
+    duration = _ffprobe_duration(in_path)
+    # normalize=0 keeps the clip's own voice track at its original level --
+    # amix's default normalize=1 would divide every input's volume by the
+    # input count, quietly ducking the dialogue just from adding a track.
+    filter_complex = (
+        f"[1:a]atrim=0:{duration},afade=t=in:st=0:d={fade_seconds},"
+        f"volume={volume}[music];"
+        f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-stream_loop", "-1", "-i", music_path,
+        "-filter_complex", filter_complex,
+        "-map", "0:v", "-map", "[a]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
+def _ffprobe_video_info(path: str) -> Tuple[int, int, float]:
+    """(width, height, fps) of a media file's first video stream, via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,r_frame_rate",
+            "-of", "csv=p=0",
+            path,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    w_str, h_str, fps_str = result.stdout.strip().split(",")
+    num, den = fps_str.split("/")
+    fps = float(num) / float(den) if float(den) else 30.0
+    return int(w_str), int(h_str), fps
+
+
+def _render_cta_text_lines(width: int, height: int, scale: int, font_path: str):
+    """Renders the two CTA text lines ("Comenta 'EDUARDO'" / "y te mando la
+    entrevista completa") onto tightly-cropped RGBA canvases. Font size 1
+    starts proportional to height, then shrinks if needed so line 1 fits
+    within the frame width -- on a narrow vertical crop (e.g. 606x1080 from
+    a 16:9 source) a height-only size otherwise overflows and clips the
+    text at both edges. Returns (line1_canvas, line2_canvas, size1)."""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+
+    canvas_w = width * scale
+    max_text_w = int(canvas_w * 0.94)
+
+    size1 = int(height * scale * 0.075)
+    size2 = int(height * scale * 0.032)
+
+    WHITE, GOLD, BLACK = (255, 255, 255, 255), (245, 185, 33, 255), (0, 0, 0, 255)
+    part_a, part_b = "Comenta ", "\"EDUARDO\""
+    line2 = "y te mando la entrevista completa"
+
+    probe = ImageDraw.Draw(PILImage.new("RGBA", (1, 1)))
+
+    def _line1_width(size):
+        font = ImageFont.truetype(font_path, size)
+        stroke = max(int(size * 0.07), 2)
+        return probe.textlength(part_a, font=font) + probe.textlength(part_b, font=font) + 4 * stroke
+
+    def _line2_width(size):
+        font = ImageFont.truetype(font_path, size)
+        stroke = max(int(size * 0.09), 2)
+        return probe.textlength(line2, font=font) + 2 * stroke
+
+    w1 = _line1_width(size1)
+    if w1 > max_text_w:
+        size1 = max(int(size1 * max_text_w / w1), 8)
+    w2 = _line2_width(size2)
+    if w2 > max_text_w:
+        size2 = max(int(size2 * max_text_w / w2), 8)
+
+    font1 = ImageFont.truetype(font_path, size1)
+    font2 = ImageFont.truetype(font_path, size2)
+    stroke1 = max(int(size1 * 0.07), 2)
+    stroke2 = max(int(size2 * 0.09), 2)
+
+    scratch_h = size1 * 2
+    line1_canvas = PILImage.new("RGBA", (canvas_w, scratch_h), (0, 0, 0, 0))
+    d1 = ImageDraw.Draw(line1_canvas)
+    origin_y = scratch_h // 2
+    w_a = d1.textlength(part_a, font=font1) + 2 * stroke1
+    w_b = d1.textlength(part_b, font=font1) + 2 * stroke1
+    x0 = (line1_canvas.width - (w_a + w_b)) / 2
+    d1.text((x0, origin_y), part_a, font=font1, fill=WHITE, stroke_width=stroke1,
+             stroke_fill=BLACK, anchor="lm")
+    d1.text((x0 + w_a, origin_y), part_b, font=font1, fill=GOLD, stroke_width=stroke1,
+             stroke_fill=BLACK, anchor="lm")
+    line1_canvas = line1_canvas.crop(line1_canvas.getbbox())
+
+    line2_canvas = PILImage.new("RGBA", (canvas_w, scratch_h), (0, 0, 0, 0))
+    d2 = ImageDraw.Draw(line2_canvas)
+    d2.text((line2_canvas.width / 2, scratch_h // 2), line2, font=font2, fill=WHITE,
+             stroke_width=stroke2, stroke_fill=BLACK, anchor="mm")
+    line2_canvas = line2_canvas.crop(line2_canvas.getbbox())
+
+    return line1_canvas, line2_canvas, size1
+
+
+def _render_cta_text_png(out_path: str, width: int, height: int) -> str:
+    """Renders the "Comenta 'EDUARDO'" CTA as a clean, anti-aliased
+    transparent PNG using the bundled Montserrat Black font -- replaces the
+    old background-removed raster text, which had a rough, speckled cutout
+    edge around the letters. Rendered at 3x and downsampled for smoother
+    edges, sized/centered to overlay directly onto a `width`x`height` frame."""
+    from PIL import Image as PILImage
+
+    from .subtitles import FONTS_DIR
+
+    scale = 3
+    font_path = str(FONTS_DIR / "Montserrat-Black.ttf")
+    line1_canvas, line2_canvas, size1 = _render_cta_text_lines(width, height, scale, font_path)
+
+    gap = int(size1 * 0.28)
+    total_h = line1_canvas.height + gap + line2_canvas.height
+    canvas = PILImage.new("RGBA", (width * scale, height * scale), (0, 0, 0, 0))
+    top = canvas.height // 2 - total_h // 2
+    canvas.alpha_composite(line1_canvas, ((canvas.width - line1_canvas.width) // 2, top))
+    canvas.alpha_composite(
+        line2_canvas,
+        ((canvas.width - line2_canvas.width) // 2, top + line1_canvas.height + gap),
+    )
+
+    canvas = canvas.resize((width, height), PILImage.LANCZOS)
+    canvas.save(out_path)
+    return out_path
+
+
+def _render_cta_overlay_png(out_path: str, width: int, height: int) -> str:
+    """Like `_render_cta_text_png`, but also stacks the show's "portada"
+    graphic (photo collage + "LA OTRA CARA DEL BILLONARIO" headline, cropped
+    from the original end-card image) above the CTA text, so the outro shows
+    both -- not just the bare text -- on top of the blurred running video.
+    The portada is scaled to fit width/height budgets so this still works on
+    both landscape and portrait frames."""
+    from PIL import Image as PILImage
+
+    from .subtitles import FONTS_DIR
+
+    scale = 3
+    font_path = str(FONTS_DIR / "Montserrat-Black.ttf")
+    line1_canvas, line2_canvas, size1 = _render_cta_text_lines(width, height, scale, font_path)
+
+    text_gap = int(size1 * 0.28)
+    text_block_h = line1_canvas.height + text_gap + line2_canvas.height
+    text_block_w = max(line1_canvas.width, line2_canvas.width)
+
+    portada_path = FONTS_DIR.parent / "cta_portada.png"
+    portada = PILImage.open(portada_path).convert("RGBA")
+    canvas_w, canvas_h = width * scale, height * scale
+
+    # Budget the whole stack (portada + gap + text) to a fraction of the
+    # frame so it fits comfortably on both landscape and portrait clips.
+    portada_gap = int(size1 * 0.4)
+    max_block_h = int(canvas_h * 0.82)
+    max_portada_w = int(canvas_w * 0.62)
+    portada_w = max_portada_w
+    portada_h = int(portada_w * portada.height / portada.width)
+    available_for_portada = max_block_h - portada_gap - text_block_h
+    if portada_h > available_for_portada:
+        portada_h = max(int(available_for_portada), 1)
+        portada_w = int(portada_h * portada.width / portada.height)
+    portada_resized = portada.resize((portada_w, portada_h), PILImage.LANCZOS)
+
+    total_w = max(text_block_w, portada_w)
+    total_h = portada_h + portada_gap + text_block_h
+    canvas = PILImage.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    top = canvas_h // 2 - total_h // 2
+    canvas.alpha_composite(portada_resized, ((canvas_w - portada_w) // 2, top))
+    text_top = top + portada_h + portada_gap
+    canvas.alpha_composite(line1_canvas, ((canvas_w - line1_canvas.width) // 2, text_top))
+    canvas.alpha_composite(
+        line2_canvas,
+        ((canvas_w - line2_canvas.width) // 2, text_top + line1_canvas.height + text_gap),
+    )
+
+    canvas = canvas.resize((width, height), PILImage.LANCZOS)
+    canvas.save(out_path)
+    return out_path
+
+
+def append_blurred_cta_outro(
+    in_path: str,
+    source_path: str,
+    cta_start_time: float,
+    out_path: str,
+    duration: float = 3.5,
+    blur_sigma: float = 22.0,
+    blur_ramp_seconds: float = 0.25,
+    overlay_delay_seconds: float = 0.25,
+    overlay_fade_seconds: float = 0.25,
+) -> str:
+    """Appends a CTA outro after in_path's video+audio, made of the *actual
+    following footage* from `source_path` (starting at `cta_start_time`,
+    normally the highlight's own end_time) instead of a static end-card --
+    so the background keeps visibly running in the same scene/set, with an
+    incremental blur (gblur's own sigma is ramped up directly over time via
+    `sendcmd`, not a sharp/blurred opacity crossfade -- crossfading two fixed
+    extremes stays visually indistinguishable from sharp for over half the
+    duration since blending in a bit of a blurred frame barely changes the
+    pixels, so the blur only became noticeable in the last stretch instead of
+    building up steadily) and the clean rendered "Comenta EDUARDO" text on
+    top. The blur reaches full strength quickly (`blur_ramp_seconds`, then
+    holds -- sendcmd's last command sticks) and the portada/text overlay only
+    fades in afterwards (`overlay_delay_seconds` + `overlay_fade_seconds`),
+    so the background is already visibly blurry before the CTA shows up
+    instead of both happening at once. The outro gets no original dialogue
+    audio (silent track instead -- background music, if any, is mixed in
+    afterwards over the extended duration) since it isn't part of the actual
+    conversation. No transition/fade is applied between in_path and the
+    outro: because the outro starts exactly where in_path's highlight ends,
+    the cut is already visually continuous."""
+    w, h, fps = _ffprobe_video_info(in_path)
+
+    raw_outro = out_path + ".rawoutro.mp4"
+    cta_png = out_path + ".ctatext.png"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", f"{cta_start_time:.3f}", "-i", source_path,
+                "-t", f"{duration}",
+                "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                raw_outro,
+            ],
+            check=True,
+        )
+        _render_cta_overlay_png(cta_png, w, h)
+
+        # Ramp sigma up over just blur_ramp_seconds (denser steps since the
+        # window is short), then leave it alone -- sendcmd's last command
+        # keeps holding, so sigma stays at blur_sigma for the rest of the
+        # outro without needing further commands.
+        ramp_seconds = min(blur_ramp_seconds, duration)
+        steps_count = max(int(ramp_seconds * 6), 8)
+        blur_commands = ";".join(
+            f"{ramp_seconds * i / (steps_count - 1):.3f} gblur@ctablur sigma "
+            f"{blur_sigma * i / (steps_count - 1):.3f}"
+            for i in range(steps_count)
+        )
+
+        filter_complex = (
+            f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,fps={fps}[oraw];"
+            f"[oraw]sendcmd=c='{blur_commands}',"
+            f"gblur@ctablur=sigma=0:steps=3[oblurred];"
+            f"[2:v]format=rgba,fade=t=in:st={overlay_delay_seconds:.3f}:"
+            f"d={overlay_fade_seconds:.3f}:alpha=1[ctatxt];"
+            f"[oblurred][ctatxt]overlay=(W-w)/2:(H-h)/2:format=auto[ov];"
+            f"[ov]format=yuv420p[v1];"
+            f"[0:v][0:a][v1][3:a]concat=n=2:v=1:a=1[outv][outa]"
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", in_path,
+            "-i", raw_outro,
+            "-loop", "1", "-t", f"{duration}", "-i", cta_png,
+            "-f", "lavfi", "-t", f"{duration}", "-i", "anullsrc=r=44100:cl=stereo",
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            out_path,
+        ]
+        subprocess.run(cmd, check=True)
+    finally:
+        for tmp in (raw_outro, cta_png):
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return out_path
 
 
@@ -316,8 +610,9 @@ def crop_clip_local(
     out_path: str,
     shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
     cut_segments: Optional[List[Tuple[float, float]]] = None,
+    crop_enabled: bool = True,
 ) -> str:
-    """Cut + reframe one highlight, returning the local mp4 path.
+    """Cut (+ optionally reframe) one highlight, returning the local mp4 path.
 
     `shot_overrides`: optional {shot_index: track_id} map to force which
     face is treated as the speaker for specific camera shots (see
@@ -328,7 +623,18 @@ def crop_clip_local(
     start_time, to remove from inside the highlight (silence gaps / filler
     words -- see editing.py). When given, use
     `editing.remap_words_across_cuts()` on the caption word list too, so
-    burned timestamps stay in sync with the shortened output."""
+    burned timestamps stay in sync with the shortened output.
+
+    `crop_enabled`: when False, skip the vertical reframe and keep the
+    source's original framing/aspect ratio (just the cuts applied) --
+    matches the editor's "Recorte vertical" toggle being off."""
+    if not crop_enabled:
+        if cut_segments:
+            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, out_path)
+        else:
+            _cut_subclip(source_path, start_time, end_time, out_path)
+        return out_path
+
     cut_path = out_path + ".cut.mp4"
     try:
         if cut_segments:
@@ -336,6 +642,232 @@ def crop_clip_local(
         else:
             _cut_subclip(source_path, start_time, end_time, cut_path)
         _reframe_vertical(cut_path, out_path, aspect_ratio, shot_overrides=shot_overrides)
+    finally:
+        if os.path.exists(cut_path):
+            os.remove(cut_path)
+    return out_path
+
+
+def _ffprobe_resolution(path: str) -> Tuple[int, int]:
+    """(width, height) of a video's first video stream, via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x",
+            path,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    w, h = result.stdout.strip().split("x")[:2]
+    return int(w), int(h)
+
+
+def _manual_crop_rect(
+    src_w: int, src_h: int, cx: float, cy: float, zoom: float, pane_aspect: float
+) -> Tuple[int, int, int, int]:
+    """Pixel crop rect (w, h, x, y) for one normalized editor selection.
+
+    Mirrors static/editor.html's crop-box maths exactly so the rectangle the
+    user drags is the rectangle ffmpeg cuts: `cx`/`cy` are 0-1 fractions of
+    the source frame (the box *centre*), `zoom` is the UI multiplier where
+    1 = the box spans the full frame height, and the width is always derived
+    from `pane_aspect` (9:16 for a single camera, 9:8 for one half of a
+    50/50 stack). The box is clamped inside the frame instead of letting the
+    centre drift off-screen -- same clamp the overlay applies -- and both
+    dimensions are forced even for H.264."""
+    zoom = max(1.0, float(zoom))
+    crop_h = src_h / zoom
+    crop_w = crop_h * pane_aspect
+    if crop_w > src_w:
+        crop_w = float(src_w)
+        crop_h = crop_w / pane_aspect
+    w = max(2, int(crop_w) - (int(crop_w) % 2))
+    h = max(2, int(crop_h) - (int(crop_h) % 2))
+    x = int(round(float(cx) * src_w - w / 2.0))
+    y = int(round(float(cy) * src_h - h / 2.0))
+    x = max(0, min(src_w - w, x))
+    y = max(0, min(src_h - h, y))
+    return w, h, x, y
+
+
+def _manual_keyframe_cuts(
+    keyframes: List[Dict],
+    start_time: float,
+    duration: float,
+    cut_segments: Optional[List[Tuple[float, float]]],
+) -> List[Tuple[float, Dict]]:
+    """Editor keyframes → [(output_start_time, keyframe)] on the *cut* clip's
+    own timeline, sorted and de-duplicated.
+
+    Keyframe `t` is an absolute source timestamp (the editor keeps every
+    timeline layer on one axis -- see
+    feedback_timeline_single_source_of_truth.md), so it has to be shifted to
+    clip-relative time and then squeezed through the same cut map the video
+    itself goes through, or a keyframe placed after a removed span would fire
+    late. A keyframe landing *inside* a removed span is snapped forward to
+    where the video resumes instead of being dropped: the editor seeds a
+    clip's first keyframe at its start_time, which "quitar silencios" very
+    often removes, and dropping it threw the user's framing away for the
+    whole clip. The first entry is always forced to 0.0 so the clip opens on
+    the earliest keyframe rather than on an unframed gap."""
+    kfs = sorted(keyframes, key=lambda k: float(k.get("t", 0.0)))
+    keep = keep_segments_from_cuts(cut_segments, duration) if cut_segments else None
+
+    points: List[Tuple[float, Dict]] = []
+    for kf in kfs:
+        rel = float(kf.get("t", 0.0)) - start_time
+        if keep is not None:
+            snapped = _snap_forward(rel, keep)
+            if snapped is None:
+                continue  # past every kept span: this framing never plays
+            mapped = remap_time(snapped, keep)
+            if mapped is None:
+                continue
+            rel = mapped
+        rel = max(0.0, min(rel, duration))
+        points.append((rel, kf))
+
+    if not points:
+        return []
+    points[0] = (0.0, points[0][1])
+    # Collapse keyframes that collapsed onto the same output timestamp (two
+    # keyframes straddling a removed span): the later one wins, matching the
+    # editor's "this framing applies from here until the next" semantics.
+    deduped: List[Tuple[float, Dict]] = []
+    for t, kf in points:
+        if deduped and abs(deduped[-1][0] - t) < 1e-3:
+            deduped[-1] = (t, kf)
+        else:
+            deduped.append((t, kf))
+    return deduped
+
+
+def _pane_filters(
+    src_w: int, src_h: int, spec: Dict, out_w: int, out_h: int, pane_aspect: float
+) -> str:
+    """crop+scale filter string for one pane from one {cx, cy, zoom} spec."""
+    w, h, x, y = _manual_crop_rect(
+        src_w, src_h,
+        float(spec.get("cx", 0.5)), float(spec.get("cy", 0.5)), float(spec.get("zoom", 1.0)),
+        pane_aspect,
+    )
+    return f"crop={w}:{h}:{x}:{y},scale={out_w}:{out_h},setsar=1"
+
+
+def crop_clip_manual(
+    source_path: str,
+    start_time: float,
+    end_time: float,
+    aspect_ratio: str,
+    out_path: str,
+    keyframes: List[Dict],
+    mode: str = "single",
+    cut_segments: Optional[List[Tuple[float, float]]] = None,
+) -> str:
+    """Cut one highlight and reframe it from the editor's *manual* crop
+    rectangles, so the exported clip matches the vertical preview exactly.
+
+    This is the manual counterpart to `crop_clip_local`, which reframes by
+    automatic active-speaker face tracking and therefore ignores whatever the
+    user dragged. Callers pick between them on whether the highlight actually
+    has keyframes.
+
+    `mode="single"` renders one 9:16 crop; `mode="split"` renders two crops of
+    the *same* source frame stacked 50/50 (top camera / bottom camera), each
+    pane being `out_w` x `out_h/2`.
+
+    `keyframes` are the editor's points on the absolute source time axis:
+    `{t, cx, cy, zoom}` for single mode, `{t, top: {...}, bottom: {...}}` for
+    split. Framing is a hard cut at each keyframe (no panning), which is
+    rendered as one trim+crop segment per interval concatenated back
+    together -- ffmpeg's `crop` filter only re-evaluates x/y per frame, not
+    w/h, so a time-varying *zoom* cannot be expressed as a single crop
+    expression."""
+    duration = end_time - start_time
+    cut_path = out_path + ".cut.mp4"
+    try:
+        if cut_segments:
+            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, cut_path)
+        else:
+            _cut_subclip(source_path, start_time, end_time, cut_path)
+
+        src_w, src_h = _ffprobe_resolution(cut_path)
+        out_w, out_h = _fit_crop_size(src_w, src_h, aspect_ratio)
+
+        if mode == "split":
+            pane_h = out_h // 2
+            pane_h = max(2, pane_h - (pane_h % 2))
+            # The stack, not _fit_crop_size, defines the real output height:
+            # an odd half would otherwise leave the two panes short of out_h.
+            pane_aspect = out_w / float(pane_h)
+        else:
+            pane_h = out_h
+            pane_aspect = out_w / float(out_h)
+
+        points = _manual_keyframe_cuts(keyframes, start_time, duration, cut_segments)
+        if not points:
+            centre = {"cx": 0.5, "cy": 0.5, "zoom": 1.0}
+            points = [(0.0, {"top": centre, "bottom": centre} if mode == "split" else centre)]
+
+        def specs_for(kf: Dict) -> List[Dict]:
+            if mode == "split":
+                return [kf.get("top") or {}, kf.get("bottom") or {}]
+            return [kf]
+
+        # Single framing for the whole clip: no trim/concat needed, so keep
+        # the cheap one-pass -filter_complex form.
+        cut_duration = _ffprobe_duration(cut_path)
+        boundaries = [t for t, _ in points] + [cut_duration]
+
+        chain_parts: List[str] = []
+        segment_labels: List[str] = []
+        for i, (_, kf) in enumerate(points):
+            seg_start, seg_end = boundaries[i], boundaries[i + 1]
+            if seg_end - seg_start <= 1e-3 and len(points) > 1:
+                continue
+            src_label = "0:v"
+            if len(points) > 1:
+                chain_parts.append(
+                    f"[0:v]trim=start={seg_start:.3f}:end={seg_end:.3f},"
+                    f"setpts=PTS-STARTPTS[seg{i}];"
+                )
+                src_label = f"seg{i}"
+            panes = specs_for(kf)
+            if mode == "split":
+                chain_parts.append(f"[{src_label}]split=2[{src_label}t][{src_label}b];")
+                chain_parts.append(
+                    f"[{src_label}t]{_pane_filters(src_w, src_h, panes[0], out_w, pane_h, pane_aspect)}[top{i}];"
+                )
+                chain_parts.append(
+                    f"[{src_label}b]{_pane_filters(src_w, src_h, panes[1], out_w, pane_h, pane_aspect)}[bot{i}];"
+                )
+                chain_parts.append(f"[top{i}][bot{i}]vstack=inputs=2[v{i}];")
+            else:
+                chain_parts.append(
+                    f"[{src_label}]{_pane_filters(src_w, src_h, panes[0], out_w, pane_h, pane_aspect)}[v{i}];"
+                )
+            segment_labels.append(f"[v{i}]")
+
+        filter_complex = "".join(chain_parts)
+        if len(segment_labels) > 1:
+            filter_complex += "".join(segment_labels) + f"concat=n={len(segment_labels)}:v=1:a=0[vout]"
+        else:
+            # One segment: rename its label rather than concat=n=1, which
+            # ffmpeg rejects.
+            filter_complex += f"{segment_labels[0]}null[vout]"
+
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", cut_path,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            out_path,
+        ]
+        subprocess.run(cmd, check=True)
     finally:
         if os.path.exists(cut_path):
             os.remove(cut_path)

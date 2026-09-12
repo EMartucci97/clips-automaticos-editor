@@ -480,7 +480,11 @@
     padding: 2px 6px;
     border-radius: 999px;
   }
-  #clip-modal-crop-box {
+  /* Two crop boxes share this: in "1 cámara" mode only #clip-modal-crop-box
+     shows (amber, unlabelled); in "2 cámaras" both show, amber = top pane,
+     cyan = bottom pane, matching the stacked preview's own halves. The
+     inactive pane dims so the zoom slider's target is never ambiguous. */
+  .crop-box {
     position: absolute;
     display: none;
     border: 2px solid var(--accent-line, #FFB020);
@@ -488,8 +492,29 @@
     cursor: move;
     box-sizing: border-box;
   }
-  #clip-modal-crop-box.visible { display: block; }
-  #clip-modal-crop-box .crop-handle {
+  .crop-box.visible { display: block; }
+  .crop-box[data-pane="bottom"] {
+    border-color: #35C4E8;
+    background: rgba(53, 196, 232, 0.12);
+  }
+  .crop-box.split-idle { opacity: .55; }
+  .crop-box .crop-box-label {
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    color: #000;
+    background: var(--accent-line, #FFB020);
+    padding: 0 4px;
+    border-radius: 3px;
+    pointer-events: none;
+    display: none;
+  }
+  .crop-box[data-pane="bottom"] .crop-box-label { background: #35C4E8; }
+  .crop-box.split .crop-box-label { display: block; }
+  .crop-box .crop-handle {
     position: absolute;
     right: -5px;
     bottom: -5px;
@@ -500,6 +525,44 @@
     border: 1px solid #000;
     cursor: nwse-resize;
   }
+  .crop-box[data-pane="bottom"] .crop-handle { background: #35C4E8; }
+  #clip-modal-crop-pane-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    padding: 5px 0;
+  }
+  #clip-modal-crop-pane-row .tool-label { flex-shrink: 0; }
+  /* Seam between the two stacked panes in the vertical preview. */
+  #clip-modal-crop-preview-divider {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.55);
+    display: none;
+    pointer-events: none;
+  }
+  #clip-modal-crop-preview-divider.visible { display: block; }
+  /* Burned-caption stand-in over the vertical preview. Geometry mirrors the
+     ASS header in subtitles.py (margins are fractions of a 1080x1920 canvas,
+     applied here as percentages) so it lands where the real burn will. */
+  #clip-modal-crop-preview-captions {
+    position: absolute;
+    left: 5.5%;
+    right: 5.5%;
+    display: none;
+    text-align: center;
+    pointer-events: none;
+    font-family: 'Montserrat', 'Inter', sans-serif;
+    font-weight: 800;
+    line-height: 1.15;
+    color: #fff;
+    text-shadow: 0 0 4px rgba(0,0,0,.85), 0 0 1px rgba(0,0,0,.9);
+  }
+  #clip-modal-crop-preview-captions.visible { display: block; }
   #clip-modal-crop-panel { margin-top: 4px; }
   #clip-modal-crop-zoom-row {
     display: flex;
@@ -510,6 +573,25 @@
   }
   #clip-modal-crop-zoom-row .tool-label { flex-shrink: 0; }
   #clip-modal-crop-zoom-row input[type="range"] { flex: 1; }
+  .tool-select {
+    font-size: 11.5px;
+    padding: 5px 8px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    max-width: 170px;
+  }
+  #clip-modal-music-volume-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    padding: 5px 0;
+  }
+  #clip-modal-music-volume-row .tool-label { flex-shrink: 0; }
+  #clip-modal-music-volume-row input[type="range"] { flex: 1; }
   #clip-modal-crop-kf-row {
     display: flex;
     align-items: center;
@@ -570,6 +652,34 @@
     text-shadow: 0 0 6px rgba(0,0,0,.85), 0 0 2px rgba(0,0,0,.9);
   }
   #clip-modal-captions-overlay.visible { display: block; }
+  #clip-modal-loading-badge {
+    position: absolute;
+    left: 50%;
+    bottom: 8%;
+    transform: translateX(-50%);
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: rgba(0,0,0,.72);
+    color: #fff;
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #clip-modal-loading-badge.visible { display: flex; }
+  #clip-modal-loading-badge .spinner {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.3);
+    border-top-color: #fff;
+    animation: clip-modal-spin .7s linear infinite;
+  }
+  @keyframes clip-modal-spin { to { transform: rotate(360deg); } }
   #clip-modal-toolbar {
     display: flex;
     align-items: center;
@@ -593,6 +703,7 @@
   }
   #clip-modal-toolbar button:hover:not(:disabled) { background: var(--row-hover); border-color: var(--accent-line); }
   #clip-modal-toolbar button:disabled { color: var(--text-faint); cursor: not-allowed; opacity: .5; }
+  #clip-modal-toolbar button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   #clip-modal-toolbar .sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
   #clip-modal-zoombar {
     display: flex;
@@ -654,6 +765,36 @@
     top: 64px;
     height: 32px;
     border-top: 1px solid var(--border-soft);
+  }
+  /* Third lane, below captions, showing the background music selected for
+     this clip. Hidden entirely when the clip has no music_track — see
+     applyClipCaptionsTrackHeight(), which also positions its `top` since the
+     captions lane above it is user-resizable. */
+  #clip-modal-music-track {
+    position: absolute;
+    left: 0; right: 0;
+    height: 28px;
+    border-top: 1px solid var(--border-soft);
+    overflow: hidden;
+    display: none;
+  }
+  .music-block {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(160, 110, 235, 0.25);
+    border: 1px solid rgba(180, 140, 245, 0.7);
+    border-radius: 3px;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 10px;
+    padding: 0 6px;
+    color: var(--text);
+    pointer-events: none;
   }
   /* Drag handle to grow/shrink the caption track above so word blocks are
      legible without depending on horizontal zoom (which doesn't help — the
@@ -952,12 +1093,24 @@
     padding: 11px;
     border-radius: 8px;
     border: none;
-    background: var(--panel-alt);
-    color: var(--text-faint);
+    background: var(--accent-dim);
+    color: var(--accent);
     font-size: 13px;
     font-weight: 600;
+    cursor: pointer;
+  }
+  #clip-modal-export-btn:disabled {
+    background: var(--panel-alt);
+    color: var(--text-faint);
     cursor: not-allowed;
   }
+  #clip-modal-export-status {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+  #clip-modal-export-status.error { color: #ff6b6b; }
+  #clip-modal-export-status a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -1023,8 +1176,15 @@
     <div id="clip-modal-video-row">
     <div id="clip-modal-video-wrap">
       <video id="clip-modal-video" src="/video" preload="metadata"></video>
+      <audio id="clip-modal-music-audio" preload="auto" loop></audio>
       <div id="clip-modal-captions-overlay"></div>
-      <div id="clip-modal-crop-box">
+      <div id="clip-modal-loading-badge"><span class="spinner"></span>Generando subtítulos…</div>
+      <div id="clip-modal-crop-box" class="crop-box" data-pane="top">
+        <span class="crop-box-label"></span>
+        <div class="crop-handle"></div>
+      </div>
+      <div id="clip-modal-crop-box-2" class="crop-box" data-pane="bottom">
+        <span class="crop-box-label">Abajo</span>
         <div class="crop-handle"></div>
       </div>
       <div id="clip-modal-playbar">
@@ -1035,6 +1195,8 @@
     <div id="clip-modal-crop-resize-handle" title="Arrastrá para agrandar/achicar"></div>
     <div id="clip-modal-crop-preview-wrap">
       <canvas id="clip-modal-crop-canvas"></canvas>
+      <div id="clip-modal-crop-preview-divider"></div>
+      <div id="clip-modal-crop-preview-captions"></div>
       <span id="clip-modal-crop-preview-label">Vertical</span>
     </div>
     </div>
@@ -1043,6 +1205,8 @@
       <button id="clip-redo" title="Rehacer (Ctrl+Shift+Z)">&#8631;</button>
       <span class="sep"></span>
       <button id="clip-cut-btn" title="Cortar el tramo marcado" disabled>Cortar selección</button>
+      <span class="sep"></span>
+      <button id="clip-hide-cuts-btn" title="Ocultar los tramos cortados y juntar la pista (solo visual, no afecta el export)">Ocultar cortes</button>
     </div>
     <div id="clip-modal-zoombar">
       <button id="clip-zoom-out" title="Alejar">&minus;</button>
@@ -1061,6 +1225,7 @@
         <div id="clip-modal-playhead"></div>
       </div>
       <div id="clip-modal-captions-track"></div>
+      <div id="clip-modal-music-track"></div>
     </div>
     <div id="clip-modal-captions-resize-handle" title="Arrastrá para agrandar/achicar el canal de subtítulos"></div>
     <div id="clip-modal-times">
@@ -1087,9 +1252,9 @@
           <span class="tool-label">Quitar silencios</span>
           <button id="clip-silence-btn" class="tool-btn" title="Detectar y quitar pausas automáticamente">Aplicar</button>
         </div>
-        <div class="tool-row disabled">
+        <div class="tool-row">
           <span class="tool-label">Quitar muletillas</span>
-          <span class="tool-tag">Próximamente</span>
+          <button id="clip-filler-btn" class="tool-btn" title="Detectar y quitar muletillas y repeticiones automáticamente">Aplicar</button>
         </div>
       </div>
       <div class="tool-section">
@@ -1100,6 +1265,13 @@
         <div class="tool-row">
           <span class="tool-label">Subtítulos</span>
           <div class="switch" id="clip-modal-captions-switch" title="Subtítulos quemados al exportar este clip (blanco/ámbar por hablante)"></div>
+        </div>
+        <div class="tool-row">
+          <span class="tool-label">Config. de subtítulos</span>
+          <div style="display:flex; gap:8px; flex-shrink:0;">
+            <button type="button" id="clip-caption-use-default-btn" class="tool-btn" title="Aplica a este clip la configuración de subtítulos guardada como predeterminada, pisando el estilo propio si ya tenía uno">Usar predeterminada</button>
+            <button type="button" id="clip-caption-save-default-btn" class="tool-btn" title="Usa el estilo, fuente, color, tamaño, posición y palabras-a-la-vez de este clip como configuración por defecto para los próximos clips">Guardar como predeterminada</button>
+          </div>
         </div>
         <div id="clip-modal-subtitle-options">
           <div class="style-grid" id="clip-modal-style-grid">
@@ -1173,9 +1345,16 @@
       </div>
       <div class="tool-section">
         <div class="tool-head">Audio</div>
-        <div class="tool-row disabled">
+        <div class="tool-row">
           <span class="tool-label">Música de fondo</span>
-          <span class="tool-tag">Próximamente</span>
+          <select id="clip-modal-music-select" class="tool-select">
+            <option value="">Sin música</option>
+          </select>
+        </div>
+        <div id="clip-modal-music-volume-row" style="display:none">
+          <span class="tool-label">Volumen</span>
+          <input type="range" id="clip-modal-music-volume-slider" min="0" max="100" step="1" value="18">
+          <span id="clip-modal-music-volume-value" class="tool-tag">18%</span>
         </div>
         <div class="tool-row disabled">
           <span class="tool-label">Nivelar voz</span>
@@ -1189,8 +1368,19 @@
           <div class="switch" id="clip-modal-crop-switch" title="Mostrar el recuadro de recorte y el preview vertical"></div>
         </div>
         <div id="clip-modal-crop-panel" style="display:none">
+          <div class="style-grid" id="clip-modal-crop-mode-grid">
+            <span class="style-chip active" data-crop-mode="single">1 cámara</span>
+            <span class="style-chip" data-crop-mode="split">2 cámaras (50/50)</span>
+          </div>
+          <div id="clip-modal-crop-pane-row" style="display:none">
+            <span class="tool-label">Editando</span>
+            <div class="style-grid">
+              <span class="style-chip active" data-crop-pane="top">Arriba</span>
+              <span class="style-chip" data-crop-pane="bottom">Abajo</span>
+            </div>
+          </div>
           <div id="clip-modal-crop-zoom-row">
-            <span class="tool-label">Zoom</span>
+            <span class="tool-label" id="clip-crop-zoom-label">Zoom</span>
             <input type="range" id="clip-crop-zoom-slider" min="1" max="4" step="0.1" value="1">
           </div>
           <div id="clip-modal-crop-kf-row">
@@ -1198,11 +1388,33 @@
             <button type="button" id="clip-crop-del-kf" title="Eliminar el punto clave más cercano" disabled>Eliminar</button>
             <span id="clip-crop-kf-count"></span>
           </div>
-          <div class="tool-hint">Arrastrá el recuadro sobre el video para mover el encuadre en el momento actual. Movete a otro punto del clip y agregá otro punto clave para que la cámara siga a quien habla.</div>
+          <div class="tool-hint" id="clip-crop-hint-single">Arrastrá el recuadro sobre el video para mover el encuadre en el momento actual. Movete a otro punto del clip y agregá otro punto clave para que la cámara siga a quien habla.</div>
+          <div class="tool-hint" id="clip-crop-hint-split" style="display:none">Dos recuadros sobre el mismo video: el ámbar es la mitad de arriba y el celeste la de abajo. Arrastralos para elegir qué mira cada “cámara”; el punto clave guarda las dos a la vez.</div>
         </div>
       </div>
       <div class="tool-section">
-        <button id="clip-modal-export-btn" disabled title="El render/export todavía no está conectado a este editor">Aplicar y exportar clip</button>
+        <div class="tool-head">Presets</div>
+        <div class="tool-row">
+          <span class="tool-label">Preset guardado</span>
+          <select id="clip-preset-select" class="tool-select">
+            <option value="">Ninguno</option>
+          </select>
+        </div>
+        <div class="tool-row">
+          <div style="display:flex; gap:8px; flex-shrink:0;">
+            <button type="button" id="clip-preset-apply-btn" class="tool-btn" title="Aplica a este clip los subtítulos, velocidad y música del preset seleccionado, pisando lo que tenga">Aplicar a este clip</button>
+            <button type="button" id="clip-preset-delete-btn" class="tool-btn" title="Borra el preset seleccionado">Borrar</button>
+          </div>
+        </div>
+        <div class="tool-row">
+          <input type="text" id="clip-preset-name-input" class="tool-select" placeholder="Estilo 1" maxlength="60">
+          <button type="button" id="clip-preset-save-btn" class="tool-btn" title="Guarda los ajustes actuales de este clip (subtítulos, velocidad, música) con ese nombre">Guardar actual</button>
+        </div>
+        <div class="tool-hint">Guarda estilo, fuente, color, tamaño, posición y palabras de los subtítulos, más velocidad y música de fondo. Guardar con un nombre existente lo pisa.</div>
+      </div>
+      <div class="tool-section">
+        <button id="clip-modal-export-btn" title="Renderiza este clip con todos los ajustes actuales (cortes, subtítulos, velocidad) a un archivo real en output/">Aplicar y exportar clip</button>
+        <div id="clip-modal-export-status"></div>
       </div>
     </div>
     </div>
@@ -1336,6 +1548,41 @@ function setSpeed(h, speed) {
 // subtitles.py's FONT_CHOICES (ASS Fontname baked into the burned-in
 // subtitles); this map only mirrors it for the live preview overlay, keyed
 // by the same short id so the two stay in lockstep.
+// Caption look-and-feel a highlight uses until the user picks something else
+// for it specifically, including "palabras a la vez" (words_per_group) --
+// the setting that controls how words get grouped into on-screen phrases.
+// Saved/read from localStorage so it survives across highlights, clips and
+// editor sessions; a highlight that already has its own value for a field
+// (customized in a previous edit) always keeps that value untouched.
+const CAPTION_DEFAULT_FALLBACK = { caption_style: 'karaoke', font: 'extrabold', caption_color: 'auto', caption_size: 'm', caption_position: 'bottom', caption_words: 1 };
+function loadCaptionDefaults() {
+  try {
+    const raw = localStorage.getItem('clipCaptionDefaults');
+    if (raw) return { ...CAPTION_DEFAULT_FALLBACK, ...JSON.parse(raw) };
+  } catch (e) {}
+  return { ...CAPTION_DEFAULT_FALLBACK };
+}
+// Fills in only the caption fields this highlight doesn't have yet (never
+// opened/customized before) with the saved default config, and PATCHes the
+// fill so a real export -- not just this live preview -- picks it up too.
+function applyCaptionDefaults(h) {
+  const defaults = loadCaptionDefaults();
+  const patch = {};
+  Object.keys(CAPTION_DEFAULT_FALLBACK).forEach(key => {
+    if (h[key] === undefined || h[key] === null) {
+      h[key] = defaults[key];
+      patch[key] = defaults[key];
+    }
+  });
+  if (Object.keys(patch).length) {
+    fetch(`/api/highlights/${h.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).catch(err => console.error('[editor] failed to save caption defaults', err));
+  }
+}
+
 const CLIP_FONT_PREVIEW = {
   extrabold: { family: "'Montserrat', 'Inter', sans-serif", weight: 800 },
   black: { family: "'Montserrat', 'Inter', sans-serif", weight: 900 },
@@ -1421,6 +1668,7 @@ function setCaptionSize(h, sizeKey) {
   if (clipEditor && clipEditor.h === h) {
     genericGridSetter(clipModalSizeGrid, 'size', sizeKey);
     clipModalCaptionsOverlay.style.fontSize = CLIP_CAPTION_SIZE_PREVIEW[sizeKey] || CLIP_CAPTION_SIZE_PREVIEW.m;
+    mirrorCaptionsIntoCropPreview(clipModalCaptionsOverlay.classList.contains('visible'));
   }
   fetch(`/api/highlights/${h.id}`, {
     method: 'PATCH',
@@ -1447,6 +1695,7 @@ function applyClipCaptionPosition() {
   const position = clipEditor.h.caption_position || 'bottom';
   clipModalCaptionsOverlay.style.top = position === 'top' ? '8%' : position === 'middle' ? '46%' : '';
   clipModalCaptionsOverlay.style.bottom = position === 'bottom' ? '8%' : '';
+  mirrorCaptionsIntoCropPreview(clipModalCaptionsOverlay.classList.contains('visible'));
 }
 
 function setCaptionWords(h, wordsCount) {
@@ -1511,6 +1760,203 @@ function toggleClipCaptionCase() {
 
 document.getElementById('clip-caption-strip-punct-btn').addEventListener('click', stripClipCaptionPunctuation);
 document.getElementById('clip-caption-toggle-case-btn').addEventListener('click', toggleClipCaptionCase);
+
+// Saves this clip's current caption style/font/color/size/position/words-a-la-vez
+// (how the phrases are grouped and shown) as the default every future clip
+// starts with, via applyCaptionDefaults() the next time a clip without its
+// own explicit settings is opened.
+const clipCaptionSaveDefaultBtn = document.getElementById('clip-caption-save-default-btn');
+clipCaptionSaveDefaultBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const h = clipEditor.h;
+  const defaults = {
+    caption_style: h.caption_style || CAPTION_DEFAULT_FALLBACK.caption_style,
+    font: h.font || CAPTION_DEFAULT_FALLBACK.font,
+    caption_color: h.caption_color || CAPTION_DEFAULT_FALLBACK.caption_color,
+    caption_size: h.caption_size || CAPTION_DEFAULT_FALLBACK.caption_size,
+    caption_position: h.caption_position || CAPTION_DEFAULT_FALLBACK.caption_position,
+    caption_words: h.caption_words || CAPTION_DEFAULT_FALLBACK.caption_words,
+  };
+  try { localStorage.setItem('clipCaptionDefaults', JSON.stringify(defaults)); } catch (e) {}
+  const original = clipCaptionSaveDefaultBtn.textContent;
+  clipCaptionSaveDefaultBtn.textContent = '✓ Guardada';
+  clipCaptionSaveDefaultBtn.disabled = true;
+  setTimeout(() => {
+    clipCaptionSaveDefaultBtn.textContent = original;
+    clipCaptionSaveDefaultBtn.disabled = false;
+  }, 1500);
+});
+
+// Forces this clip back onto the saved default config, overwriting any
+// per-clip customization it already had -- unlike applyCaptionDefaults()
+// (which only fills in fields the highlight never set), this always applies
+// every field. Reuses the individual setters so UI refresh and the
+// server PATCH stay identical to picking each value by hand.
+const clipCaptionUseDefaultBtn = document.getElementById('clip-caption-use-default-btn');
+clipCaptionUseDefaultBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const h = clipEditor.h;
+  const defaults = loadCaptionDefaults();
+  setCaptionStyle(h, defaults.caption_style);
+  setFont(h, defaults.font);
+  setCaptionColor(h, defaults.caption_color);
+  setCaptionSize(h, defaults.caption_size);
+  setCaptionPosition(h, defaults.caption_position);
+  setCaptionWords(h, defaults.caption_words);
+  const original = clipCaptionUseDefaultBtn.textContent;
+  clipCaptionUseDefaultBtn.textContent = '✓ Aplicada';
+  clipCaptionUseDefaultBtn.disabled = true;
+  setTimeout(() => {
+    clipCaptionUseDefaultBtn.textContent = original;
+    clipCaptionUseDefaultBtn.disabled = false;
+  }, 1500);
+});
+
+// Named presets: a saved bundle of caption look + speed + background music,
+// re-applicable to any other clip. Unlike the single anonymous default above
+// (localStorage, captions only, auto-filled on first open), presets live
+// server-side in output/clip_presets.json and are only applied on demand.
+const clipPresetSelect = document.getElementById('clip-preset-select');
+const clipPresetNameInput = document.getElementById('clip-preset-name-input');
+const clipPresetApplyBtn = document.getElementById('clip-preset-apply-btn');
+const clipPresetSaveBtn = document.getElementById('clip-preset-save-btn');
+const clipPresetDeleteBtn = document.getElementById('clip-preset-delete-btn');
+let clipPresets = [];
+
+function flashToolBtn(btn, text) {
+  const original = btn.textContent;
+  btn.textContent = text;
+  btn.disabled = true;
+  setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
+}
+
+function renderPresetOptions(selectedName) {
+  const keep = selectedName !== undefined ? selectedName : clipPresetSelect.value;
+  clipPresetSelect.innerHTML = '<option value="">Ninguno</option>';
+  clipPresets.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    opt.textContent = p.name;
+    clipPresetSelect.appendChild(opt);
+  });
+  clipPresetSelect.value = clipPresets.some(p => p.name === keep) ? keep : '';
+}
+
+function loadPresets(selectedName) {
+  return fetch('/api/presets')
+    .then(r => r.json())
+    .then(list => {
+      clipPresets = Array.isArray(list) ? list : [];
+      renderPresetOptions(selectedName);
+    })
+    .catch(err => console.error('[editor] failed to load presets', err));
+}
+loadPresets();
+
+clipPresetSaveBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const h = clipEditor.h;
+  const name = (clipPresetNameInput.value || clipPresetSelect.value).trim();
+  if (!name) {
+    clipPresetNameInput.focus();
+    return;
+  }
+  const settings = {
+    caption_style: h.caption_style || CAPTION_DEFAULT_FALLBACK.caption_style,
+    font: h.font || CAPTION_DEFAULT_FALLBACK.font,
+    caption_color: h.caption_color || CAPTION_DEFAULT_FALLBACK.caption_color,
+    caption_size: h.caption_size || CAPTION_DEFAULT_FALLBACK.caption_size,
+    caption_position: h.caption_position || CAPTION_DEFAULT_FALLBACK.caption_position,
+    caption_words: h.caption_words || CAPTION_DEFAULT_FALLBACK.caption_words,
+    captions_enabled: h.captions_enabled !== false,
+    speed: h.speed || 1.0,
+    music_track: h.music_track || '',
+    music_volume: h.music_volume ?? DEFAULT_MUSIC_VOLUME,
+  };
+  fetch(`/api/presets/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  })
+    .then(r => r.json())
+    .then(() => {
+      clipPresetNameInput.value = '';
+      return loadPresets(name);
+    })
+    .then(() => flashToolBtn(clipPresetSaveBtn, '✓ Guardado'))
+    .catch(err => console.error('[editor] failed to save preset', err));
+});
+
+clipPresetApplyBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const preset = clipPresets.find(p => p.name === clipPresetSelect.value);
+  if (!preset) return;
+  const s = preset.settings || {};
+  const h = clipEditor.h;
+  if (s.captions_enabled !== undefined) setCaptionsEnabled(h, s.captions_enabled);
+  if (s.caption_style) setCaptionStyle(h, s.caption_style);
+  if (s.font) setFont(h, s.font);
+  if (s.caption_color) setCaptionColor(h, s.caption_color);
+  if (s.caption_size) setCaptionSize(h, s.caption_size);
+  if (s.caption_position) setCaptionPosition(h, s.caption_position);
+  if (s.caption_words) setCaptionWords(h, s.caption_words);
+  if (s.speed) setSpeed(h, s.speed);
+  // Volume before track: setMusicTrack reads h.music_volume to set the preview
+  // <audio> gain. Neither setter touches its own control (both are normally
+  // driven by the user's own input event), so sync those by hand here.
+  if (s.music_volume !== undefined) {
+    const volumePct = Math.round(s.music_volume * 100);
+    clipModalMusicVolumeSlider.value = volumePct;
+    clipModalMusicVolumeValue.textContent = `${volumePct}%`;
+    setMusicVolume(h, s.music_volume);
+  }
+  if (s.music_track !== undefined) {
+    clipModalMusicSelect.value = s.music_track || '';
+    setMusicTrack(h, s.music_track || '');
+  }
+  flashToolBtn(clipPresetApplyBtn, '✓ Aplicado');
+});
+
+clipPresetDeleteBtn.addEventListener('click', () => {
+  const name = clipPresetSelect.value;
+  if (!name) return;
+  fetch(`/api/presets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    .then(() => loadPresets(''))
+    .then(() => flashToolBtn(clipPresetDeleteBtn, '✓ Borrado'))
+    .catch(err => console.error('[editor] failed to delete preset', err));
+});
+
+// Real render: calls the server-side export pipeline (crop + cuts +
+// burned captions incl. the always-on number/time-to-digits cleanup +
+// speed) so every setting configured for this clip actually reaches a
+// real output file, not just the JSON cache -- see editor_server.py's
+// /api/highlights/<id>/export.
+const clipExportBtn = document.getElementById('clip-modal-export-btn');
+const clipExportStatus = document.getElementById('clip-modal-export-status');
+clipExportBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  const h = clipEditor.h;
+  const originalText = clipExportBtn.textContent;
+  clipExportBtn.disabled = true;
+  clipExportBtn.textContent = 'Exportando…';
+  clipExportStatus.classList.remove('error');
+  clipExportStatus.textContent = 'Renderizando clip real (puede tardar según la duración y los subtítulos)…';
+  fetch(`/api/highlights/${h.id}/export`, { method: 'POST' })
+    .then(res => res.json().then(data => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'export failed');
+      clipExportBtn.textContent = '✓ Exportado';
+      clipExportStatus.innerHTML = `Listo: <a href="${data.url}" target="_blank">ver / descargar el video</a>`;
+      setTimeout(() => { clipExportBtn.textContent = originalText; clipExportBtn.disabled = false; }, 2000);
+    })
+    .catch(err => {
+      clipExportBtn.textContent = originalText;
+      clipExportBtn.disabled = false;
+      clipExportStatus.classList.add('error');
+      clipExportStatus.textContent = 'Error al exportar: ' + err.message;
+      console.error('[editor] export failed', err);
+    });
+});
 
 function renderSubmarkers() {
   timeline.querySelectorAll('.submarker').forEach(el => el.remove());
@@ -2089,8 +2535,11 @@ const clipModalPlayhead = document.getElementById('clip-modal-playhead');
 const clipModalSelection = document.getElementById('clip-modal-selection');
 const clipModalWaveform = document.getElementById('clip-modal-waveform');
 const clipModalCaptionsTrack = document.getElementById('clip-modal-captions-track');
+const clipModalMusicTrack = document.getElementById('clip-modal-music-track');
+const clipModalMusicAudio = document.getElementById('clip-modal-music-audio');
 const clipModalRulerCanvas = document.getElementById('clip-modal-ruler-canvas');
 const clipModalCaptionsOverlay = document.getElementById('clip-modal-captions-overlay');
+const clipModalLoadingBadge = document.getElementById('clip-modal-loading-badge');
 const clipModalPlayBtn = document.getElementById('clip-modal-playpause');
 const clipModalPlayTime = document.getElementById('clip-modal-playtime');
 const clipModalTranscriptEl = document.getElementById('clip-modal-transcript');
@@ -2109,9 +2558,22 @@ const clipCropZoomSlider = document.getElementById('clip-crop-zoom-slider');
 const clipCropAddKfBtn = document.getElementById('clip-crop-add-kf');
 const clipCropDelKfBtn = document.getElementById('clip-crop-del-kf');
 const clipCropKfCountEl = document.getElementById('clip-crop-kf-count');
+const clipModalCropBox2 = document.getElementById('clip-modal-crop-box-2');
+const clipModalCropModeGrid = document.getElementById('clip-modal-crop-mode-grid');
+const clipModalCropPaneRow = document.getElementById('clip-modal-crop-pane-row');
+const clipModalCropPreviewDivider = document.getElementById('clip-modal-crop-preview-divider');
+const clipModalCropPreviewCaptions = document.getElementById('clip-modal-crop-preview-captions');
+const clipCropHintSingle = document.getElementById('clip-crop-hint-single');
+const clipCropHintSplit = document.getElementById('clip-crop-hint-split');
+const clipCropZoomLabel = document.getElementById('clip-crop-zoom-label');
 const CLIP_CROP_ASPECT = 9 / 16;
+// One pane of the 50/50 stack is half as tall as the full 9:16 frame, so it is
+// twice as wide relative to its own height: 9:8.
+const CLIP_SPLIT_PANE_ASPECT = 9 / 8;
 const clipCutBtn = document.getElementById('clip-cut-btn');
+const clipHideCutsBtn = document.getElementById('clip-hide-cuts-btn');
 const clipSilenceBtn = document.getElementById('clip-silence-btn');
+const clipFillerBtn = document.getElementById('clip-filler-btn');
 const clipModalTitleEl = document.getElementById('clip-modal-title');
 const clipModalNumEl = document.getElementById('clip-modal-num');
 const clipModalCaptionsSwitch = document.getElementById('clip-modal-captions-switch');
@@ -2156,6 +2618,66 @@ clipModalWordsGrid.addEventListener('click', e => {
   if (!clipEditor || !e.target.classList.contains('style-chip')) return;
   setCaptionWords(clipEditor.h, parseInt(e.target.dataset.words, 10));
 });
+const DEFAULT_MUSIC_VOLUME = 0.18;
+const clipModalMusicSelect = document.getElementById('clip-modal-music-select');
+const clipModalMusicVolumeRow = document.getElementById('clip-modal-music-volume-row');
+const clipModalMusicVolumeSlider = document.getElementById('clip-modal-music-volume-slider');
+const clipModalMusicVolumeValue = document.getElementById('clip-modal-music-volume-value');
+fetch('/api/music_tracks').then(res => res.json()).then(tracks => {
+  tracks.forEach(track => {
+    const opt = document.createElement('option');
+    opt.value = track;
+    opt.textContent = track.replace(/\.[^.]+$/, '');
+    clipModalMusicSelect.appendChild(opt);
+  });
+}).catch(err => console.error('[editor] failed to load music tracks', err));
+clipModalMusicSelect.addEventListener('change', () => {
+  if (!clipEditor) return;
+  setMusicTrack(clipEditor.h, clipModalMusicSelect.value);
+});
+clipModalMusicVolumeSlider.addEventListener('input', () => {
+  clipModalMusicVolumeValue.textContent = `${clipModalMusicVolumeSlider.value}%`;
+  clipModalMusicAudio.volume = parseInt(clipModalMusicVolumeSlider.value, 10) / 100;
+});
+clipModalMusicVolumeSlider.addEventListener('change', () => {
+  if (!clipEditor) return;
+  setMusicVolume(clipEditor.h, parseInt(clipModalMusicVolumeSlider.value, 10) / 100);
+});
+// Sets h.music_track (filename in assets/music/, or '' for none) and PATCHes
+// it; the export endpoint mixes it in with ffmpeg amix at h.music_volume. Also
+// (re)points the preview <audio> at the track so it plays alongside the
+// <video> in the modal — see syncClipMusicAudio() for how the two are kept
+// roughly aligned, since the real mix only happens server-side on export.
+function setMusicTrack(h, track) {
+  h.music_track = track || undefined;
+  if (clipEditor && clipEditor.h === h) {
+    clipModalMusicVolumeRow.style.display = track ? '' : 'none';
+    applyClipCaptionsTrackHeight();
+    renderMusicTrack();
+    clipModalMusicAudio.pause();
+    if (track) {
+      clipModalMusicAudio.src = `/api/music_tracks/${encodeURIComponent(track)}`;
+      clipModalMusicAudio.volume = h.music_volume ?? DEFAULT_MUSIC_VOLUME;
+      clipModalMusicAudio.load();
+    } else {
+      clipModalMusicAudio.removeAttribute('src');
+      clipModalMusicAudio.load();
+    }
+  }
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ music_track: track || null }),
+  }).catch(err => console.error('[editor] failed to save music_track', err));
+}
+function setMusicVolume(h, volume) {
+  h.music_volume = volume;
+  fetch(`/api/highlights/${h.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ music_volume: volume }),
+  }).catch(err => console.error('[editor] failed to save music_volume', err));
+}
 // Applies clipEditor.h.speed to the <video> element and turns on the
 // browser's built-in pitch-correction flag (vendor-prefixed variants for
 // older Firefox/Safari) so sped-up playback doesn't sound like a chipmunk.
@@ -2182,6 +2704,7 @@ let clipDragging = null;      // 'start' | 'end' while trimming a boundary
 let clipSelecting = false;    // true while drag-selecting a range to cut
 let clipJustSelected = false; // suppresses the seek-click right after a drag-select
 let clipPlayheadDragging = false; // suppresses the seek-click right after a playhead drag
+let clipInternalSeek = false; // true while a currentTime write is our own cut-skip/clamp, not a real user seek
 
 function cloneClipState(s) {
   return { start: s.start, end: s.end, cuts: s.cuts.map(c => ({ ...c })) };
@@ -2207,12 +2730,26 @@ function normalizeCuts(cuts, start, end) {
 }
 
 function openClipEditor(h) {
+  applyCaptionDefaults(h);
   const initial = { start: h.start_time, end: h.end_time, cuts: (h.cuts || []).map(c => ({ ...c })) };
-  clipEditor = { h, state: initial, winStart: 0, winEnd: duration, zoom: 1, history: [cloneClipState(initial)], histIdx: 0, pendingSelection: null };
-  clipEditor.crop = { enabled: !!h.crop_enabled, keyframes: (h.crop_keyframes || []).map(k => ({ ...k })) };
+  clipEditor = { h, state: initial, winStart: 0, winEnd: duration, zoom: 1, history: [cloneClipState(initial)], histIdx: 0, pendingSelection: null, rippleView: false };
+  clipHideCutsBtn.classList.remove('active');
+  clipHideCutsBtn.textContent = 'Ocultar cortes';
+  clipEditor.crop = {
+    enabled: !!h.crop_enabled,
+    mode: h.crop_mode === 'split' ? 'split' : 'single',
+    keyframes: (h.crop_keyframes || []).map(k => ({ ...k })),
+    splitKeyframes: (h.split_keyframes || []).map(k => ({
+      t: k.t,
+      top: { ...(k.top || { cx: 0.5, cy: 0.5, zoom: 1 }) },
+      bottom: { ...(k.bottom || { cx: 0.5, cy: 0.5, zoom: 1 }) },
+    })),
+    activePane: 'top',
+  };
   clipModalCropSwitch.classList.toggle('on', clipEditor.crop.enabled);
   clipModalCropPanel.style.display = clipEditor.crop.enabled ? '' : 'none';
   clipModalCropBox.classList.toggle('visible', clipEditor.crop.enabled);
+  clipModalCropBox2.classList.toggle('visible', clipEditor.crop.enabled && clipEditor.crop.mode === 'split');
   clipModalCropPreviewWrap.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalCropResizeHandle.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalNumEl.textContent = computeNumbering().get(h.id);
@@ -2246,7 +2783,21 @@ function openClipEditor(h) {
   clipModalWordsGrid.querySelectorAll('.style-chip').forEach(chip => {
     chip.classList.toggle('active', parseInt(chip.dataset.words, 10) === (h.caption_words || 1));
   });
+  clipModalMusicSelect.value = h.music_track || '';
+  const musicVolumePct = Math.round((h.music_volume ?? DEFAULT_MUSIC_VOLUME) * 100);
+  clipModalMusicVolumeSlider.value = musicVolumePct;
+  clipModalMusicVolumeValue.textContent = `${musicVolumePct}%`;
+  clipModalMusicVolumeRow.style.display = h.music_track ? '' : 'none';
+  clipModalMusicAudio.pause();
+  if (h.music_track) {
+    clipModalMusicAudio.src = `/api/music_tracks/${encodeURIComponent(h.music_track)}`;
+    clipModalMusicAudio.volume = musicVolumePct / 100;
+  } else {
+    clipModalMusicAudio.removeAttribute('src');
+  }
+  applyClipCaptionsTrackHeight();
   clipModalCaptionsOverlay.classList.remove('visible');
+  clipModalLoadingBadge.classList.add('visible');
   clipModalOverlay.classList.add('open');
   video.pause();
   playerWrap.style.visibility = 'hidden';
@@ -2263,7 +2814,10 @@ function openClipEditor(h) {
 function closeClipEditor() {
   clipModalOverlay.classList.remove('open');
   clipModalCaptionsOverlay.classList.remove('visible');
+  clipModalLoadingBadge.classList.remove('visible');
   clipModalVideo.pause();
+  clipModalMusicAudio.pause();
+  clipModalMusicAudio.removeAttribute('src');
   playerWrap.style.visibility = '';
   clipEditor = null;
 }
@@ -2304,11 +2858,16 @@ clipModalEl.addEventListener('transitionend', (e) => {
 // doesn't make short captions any taller/more legible.
 const clipModalCaptionsResizeHandle = document.getElementById('clip-modal-captions-resize-handle');
 const CLIP_TIMELINE_TRACK_H = 64; // fixed height of the waveform+scrub track above the captions band
+const CLIP_MUSIC_TRACK_H = 28; // fixed height of the music lane below captions
 let clipCaptionsTrackHeight = 32;
 try { clipCaptionsTrackHeight = parseFloat(localStorage.getItem('clipCaptionsTrackHeight')) || 32; } catch (e) {}
 function applyClipCaptionsTrackHeight() {
   clipModalCaptionsTrack.style.height = clipCaptionsTrackHeight + 'px';
-  clipModalTimelineEl.style.height = (CLIP_TIMELINE_TRACK_H + clipCaptionsTrackHeight) + 'px';
+  const hasMusic = !!(clipEditor && clipEditor.h.music_track);
+  clipModalMusicTrack.style.display = hasMusic ? 'block' : 'none';
+  clipModalMusicTrack.style.top = (CLIP_TIMELINE_TRACK_H + clipCaptionsTrackHeight) + 'px';
+  const musicH = hasMusic ? CLIP_MUSIC_TRACK_H : 0;
+  clipModalTimelineEl.style.height = (CLIP_TIMELINE_TRACK_H + clipCaptionsTrackHeight + musicH) + 'px';
 }
 applyClipCaptionsTrackHeight();
 clipModalCaptionsResizeHandle.addEventListener('mousedown', (e) => {
@@ -2399,6 +2958,9 @@ clipModalCropResizeHandle.addEventListener('mousedown', (e) => {
     if (clipEditor) {
       renderClipCropBox();
       drawClipCropPreview();
+      // Caption size in the vertical preview is a fraction of its height, so
+      // it has to follow the resize too.
+      mirrorCaptionsIntoCropPreview(clipModalCaptionsOverlay.classList.contains('visible'));
     }
   };
   const onUp = () => {
@@ -2508,6 +3070,35 @@ function getCaptionBlocks() {
   return blocks;
 }
 
+// Cleaned/merged tokens (Whisper mis-hear fixes, spoken numbers -> digits --
+// same _llm_cleanup_words pass build_ass runs before burning) whose time
+// midpoint falls inside [rangeStart, rangeEnd]. Matched by absolute
+// word_start/word_end (never rewritten by caption-timing drags), so this
+// stays correct regardless of any manual timing adjustment on the raw
+// words. Returns [] if the cleanup pass hasn't loaded or failed, so callers
+// should fall back to the raw words in that case.
+function _cleanedTokensForRange(rangeStart, rangeEnd) {
+  const displayWords = (clipEditor && clipEditor.displayWords) || [];
+  return displayWords.filter(cw => {
+    const mid = (cw.word_start + cw.word_end) / 2;
+    return mid >= rangeStart - 1e-6 && mid <= rangeEnd + 1e-6;
+  });
+}
+
+// Text to display for a caption block: the cleaned/merged tokens covering
+// its time range when available (so numbers/times show as digits), falling
+// back to the raw words verbatim otherwise. The block's underlying
+// block.words stays the raw, one-object-per-original-word array -- only the
+// displayed text changes -- so drag-to-adjust-timing keeps working.
+function _blockDisplayText(block) {
+  const raw = block.words.map(w => w.word.trim()).join(' ');
+  if (!block.words.length) return raw;
+  const rangeStart = block.words[0].word_start;
+  const rangeEnd = block.words[block.words.length - 1].word_end;
+  const cleanedTokens = _cleanedTokensForRange(rangeStart, rangeEnd);
+  return cleanedTokens.length ? cleanedTokens.map(w => w.word.trim()).join(' ') : raw;
+}
+
 async function loadCaptionGroups(h) {
   const editorAtRequest = clipEditor;
   const size = h.caption_words || 1;
@@ -2536,7 +3127,23 @@ async function loadClipCaptions(h) {
     const res = await fetch(`/api/captions_range?start=${h.start_time}&end=${h.end_time}`);
     const data = await res.json();
     if (clipEditor !== editorAtRequest) return; // modal moved on to another clip
+    clipModalLoadingBadge.classList.remove('visible');
     clipEditor.captionWords = data.words || [];
+    // Cleaned/merged tokens (numbers -> digits, mis-hear fixes) for DISPLAY
+    // only -- used by updateClipCaptionsOverlay()/_blockDisplayText() and,
+    // via _transcriptDisplayTexts(), for the transcript panel's rendered
+    // text too. Never used by the caption drag/timing system or by editing
+    // (startClipWordTextEdit), which both need captionWords to stay raw and
+    // one-object-per-original-word.
+    // The LLM cleanup pass adds full grammatical punctuation (commas,
+    // periods), but build_ass() in subtitles.py always strips it before
+    // burning (strip_punctuation defaults True and is never overridden by
+    // editor_server.py) -- so the preview must strip it here too, otherwise
+    // it shows punctuation the real export will never contain.
+    clipEditor.displayWords = (data.cleaned_words || []).map(w => ({
+      ...w,
+      word: w.word.replace(/[.,]/g, ''),
+    }));
     applyCaptionTimeOverrides(h, clipEditor.captionWords);
     updateClipCaptionsOverlay();
     renderClipTranscript();
@@ -2545,6 +3152,7 @@ async function loadClipCaptions(h) {
   } catch (err) {
     console.error('[editor] failed to load captions_range', err);
     clipModalTranscriptEl.textContent = 'No se pudo cargar la transcripción.';
+    clipModalLoadingBadge.classList.remove('visible');
   }
 }
 
@@ -2646,6 +3254,39 @@ clipTranscriptSelbarEl.querySelectorAll('button[data-speaker]').forEach(btn => {
   });
 });
 
+// Per-raw-word display text for the transcript panel: the same
+// _llm_cleanup_words fixes (Whisper mis-hears, spoken numbers -> digits)
+// already shown in the video overlay/preview, mapped onto the raw
+// one-word-per-index array by matching each raw word's time midpoint
+// against a cleaned token's [word_start, word_end] range -- absolute
+// timestamps, unaffected by caption-timing drags. captionWords itself is
+// left untouched (still raw, one-object-per-original-word) so click-to-seek,
+// double-click-to-edit and drag-to-adjust-timing keep working exactly as
+// before; only what gets painted into the span changes. A cleaned token
+// that merges several raw words (e.g. "ocho y media" -> "8:30") shows its
+// text on the first of those raw words and blanks the rest, so the panel
+// still reads as one flowing sentence instead of repeating "8:30" three
+// times. Returns null (meaning: fall back to raw w.word) if cleanup hasn't
+// loaded for this clip.
+function _transcriptDisplayTexts(captionWords, displayWords) {
+  if (!displayWords || !displayWords.length) return null;
+  const out = new Array(captionWords.length);
+  let lastToken = null;
+  for (let i = 0; i < captionWords.length; i++) {
+    const w = captionWords[i];
+    const mid = (w.word_start + w.word_end) / 2;
+    const token = displayWords.find(cw => mid >= cw.word_start - 1e-6 && mid <= cw.word_end + 1e-6);
+    if (!token) {
+      out[i] = w.word;
+      lastToken = null;
+      continue;
+    }
+    out[i] = token === lastToken ? '' : token.word.trim();
+    lastToken = token;
+  }
+  return out;
+}
+
 function renderClipTranscript() {
   if (!clipEditor) return;
   const words = clipEditor.captionWords || [];
@@ -2658,10 +3299,12 @@ function renderClipTranscript() {
   }
   clipModalTranscriptEl.innerHTML = '';
   const frag = document.createDocumentFragment();
+  const displayTexts = _transcriptDisplayTexts(words, clipEditor.displayWords);
   words.forEach((w, i) => {
     const span = document.createElement('span');
-    span.className = 'word' + (w.speaker === 'OTHER' ? ' other' : w.speaker === 'ROBERTO' ? ' roberto' : '') + (w.word.trim() ? '' : ' empty');
-    span.textContent = w.word;
+    const text = displayTexts ? displayTexts[i] : w.word;
+    span.className = 'word' + (w.speaker === 'OTHER' ? ' other' : w.speaker === 'ROBERTO' ? ' roberto' : '') + (text.trim() ? '' : ' empty');
+    span.textContent = text;
     span.dataset.idx = i;
     span.addEventListener('click', (e) => {
       if (!clipEditor) return;
@@ -2701,9 +3344,53 @@ function updateClipTranscriptActiveWord() {
   }
 }
 
+// ASS caption geometry from subtitles.py, expressed as fractions of the
+// 1080x1920 canvas the real burn is sized against: CAPTION_SIZES in pt, and
+// CAPTION_POSITIONS' MarginV in px (bottom 220, top 160, middle centered).
+// The vertical preview scales all of it by its own height so the mirrored
+// captions land where the burned ones will, at any preview size.
+const CLIP_CAPTION_ASS_SIZE = { s: 80, m: 110, l: 140, xl: 170 };
+
+// The vertical preview shows the exported 9:16 frame, so it needs its own copy
+// of the caption overlay: the main overlay sits over the *wide* source video
+// and says nothing about where a caption falls once the frame is cropped (or,
+// in split mode, which of the two cameras it covers). Both are filled from the
+// same innerHTML so they can never disagree about the text or the styling --
+// only the geometry differs.
+function mirrorCaptionsIntoCropPreview(visible) {
+  if (!clipModalCropPreviewCaptions) return;
+  if (!visible || !clipEditor || !clipEditor.crop || !clipEditor.crop.enabled) {
+    clipModalCropPreviewCaptions.classList.remove('visible');
+    return;
+  }
+  const el = clipModalCropPreviewCaptions;
+  el.innerHTML = clipModalCaptionsOverlay.innerHTML;
+  const previewH = clipModalCropPreviewWrap.clientHeight || 1;
+  const h = clipEditor.h;
+  const sizePt = CLIP_CAPTION_ASS_SIZE[h.caption_size || 'm'] || CLIP_CAPTION_ASS_SIZE.m;
+  el.style.fontSize = Math.max(6, sizePt * previewH / 1920) + 'px';
+  const position = h.caption_position || 'bottom';
+  if (position === 'top') {
+    el.style.top = (160 / 1920 * 100) + '%';
+    el.style.bottom = '';
+    el.style.transform = '';
+  } else if (position === 'middle') {
+    el.style.top = '50%';
+    el.style.bottom = '';
+    el.style.transform = 'translateY(-50%)';
+  } else {
+    el.style.top = '';
+    el.style.bottom = (220 / 1920 * 100) + '%';
+    el.style.transform = '';
+  }
+  el.style.textShadow = clipModalCaptionsOverlay.style.textShadow;
+  el.classList.add('visible');
+}
+
 function updateClipCaptionsOverlay() {
   if (!clipEditor || clipEditor.h.captions_enabled === false || !clipEditor.captionWords) {
     clipModalCaptionsOverlay.classList.remove('visible');
+    mirrorCaptionsIntoCropPreview(false);
     return;
   }
   const t = clipModalVideo.currentTime - clipEditor.h.start_time;
@@ -2721,6 +3408,7 @@ function updateClipCaptionsOverlay() {
   });
   if (idx < 0) {
     clipModalCaptionsOverlay.classList.remove('visible');
+    mirrorCaptionsIntoCropPreview(false);
     return;
   }
   const word = words[idx];
@@ -2729,7 +3417,6 @@ function updateClipCaptionsOverlay() {
   const fixedColor = CLIP_CAPTION_COLOR_PREVIEW[colorKey];
   const activeColor = fixedColor || (word.speaker === 'OTHER' ? CAPTIONS_COLOR_OTHER : '#fff');
   const style = h.caption_style || 'karaoke';
-  const wordsPerGroup = h.caption_words || 1;
 
   clipModalCaptionsOverlay.innerHTML = '';
   // Wrap the rendered words in their own inline-block so a "bold" background
@@ -2741,28 +3428,59 @@ function updateClipCaptionsOverlay() {
   // Show the whole group of words together (not built up one at a time): words
   // before/after the active one in its group are dimmed, and the active one
   // gets painted as time passes over it — mirrors build_ass in subtitles.py.
-  const groupSize = wordsPerGroup > 0 ? wordsPerGroup : 1;
-  const [groupStart, groupEnd] = groupCaptionBoundaries(words, groupSize).find(([s, e]) => idx >= s && idx < e) || [idx, idx + 1];
-  const before = words.slice(groupStart, idx).filter(w => w.word.trim());
-  const after = words.slice(idx + 1, groupEnd).filter(w => w.word.trim());
-  if (before.length) {
+  // Boundaries come from getCaptionBlocks() (the same LLM coherent-phrase
+  // grouping the timeline block track uses, via /api/caption_groups) instead
+  // of recomputing the mechanical fallback here -- this project's
+  // transcripts carry no punctuation, so that fallback always degraded to a
+  // fixed-size cut and produced awkward mid-clause boundaries.
+  const blocks = getCaptionBlocks();
+  const block = blocks.find(b => t >= b.start && t < b.end) || { words: [word] };
+  const groupWords = block.words;
+  const gIdx = groupWords.indexOf(word);
+  const before = gIdx > 0 ? groupWords.slice(0, gIdx).filter(w => w.word.trim()) : [];
+  const after = gIdx >= 0 ? groupWords.slice(gIdx + 1).filter(w => w.word.trim()) : [];
+
+  // Prefer cleaned/merged text (numbers -> digits, mis-hear fixes) for the
+  // whole group when the cleanup pass has loaded for this window, falling
+  // back to the raw words otherwise.
+  const rangeStart = groupWords[0].word_start;
+  const rangeEnd = groupWords[groupWords.length - 1].word_end;
+  const cleanedTokens = _cleanedTokensForRange(rangeStart, rangeEnd);
+  let beforeText, activeText, afterText;
+  if (cleanedTokens.length) {
+    let activeCleanedIdx = 0;
+    let bestDist = Infinity;
+    cleanedTokens.forEach((cw, i) => {
+      const dist = Math.abs(cw.word_start - word.word_start);
+      if (dist < bestDist) { bestDist = dist; activeCleanedIdx = i; }
+    });
+    beforeText = cleanedTokens.slice(0, activeCleanedIdx).map(w => w.word.trim()).join(' ');
+    activeText = cleanedTokens[activeCleanedIdx].word.trim();
+    afterText = cleanedTokens.slice(activeCleanedIdx + 1).map(w => w.word.trim()).join(' ');
+  } else {
+    beforeText = before.map(w => w.word.trim()).join(' ');
+    activeText = word.word.trim();
+    afterText = after.map(w => w.word.trim()).join(' ');
+  }
+
+  if (beforeText) {
     const beforeSpan = document.createElement('span');
     beforeSpan.style.opacity = '0.5';
     beforeSpan.style.color = activeColor;
-    beforeSpan.textContent = before.map(w => w.word.trim()).join(' ') + ' ';
+    beforeSpan.textContent = beforeText + ' ';
     wrap.appendChild(beforeSpan);
   }
   const activeSpan = document.createElement('span');
   activeSpan.style.color = activeColor;
-  activeSpan.textContent = word.word.trim();
+  activeSpan.textContent = activeText;
   if (style === 'highlight') activeSpan.style.display = 'inline-block';
   if (style === 'highlight') activeSpan.style.transform = 'scale(1.15)';
   wrap.appendChild(activeSpan);
-  if (after.length) {
+  if (afterText) {
     const afterSpan = document.createElement('span');
     afterSpan.style.opacity = '0.5';
     afterSpan.style.color = activeColor;
-    afterSpan.textContent = ' ' + after.map(w => w.word.trim()).join(' ');
+    afterSpan.textContent = ' ' + afterText;
     wrap.appendChild(afterSpan);
   }
   clipModalCaptionsOverlay.appendChild(wrap);
@@ -2774,6 +3492,7 @@ function updateClipCaptionsOverlay() {
     ? '0 0 2px rgba(0,0,0,.6)'
     : '0 0 6px rgba(0,0,0,.85), 0 0 2px rgba(0,0,0,.9)';
   clipModalCaptionsOverlay.classList.add('visible');
+  mirrorCaptionsIntoCropPreview(true);
 }
 
 document.getElementById('clip-modal-close').addEventListener('click', closeClipEditor);
@@ -2801,7 +3520,46 @@ function windowBounds() {
   };
 }
 
+// "Ripple view" (Ocultar cortes): a purely presentational remapping of the
+// same absolute source-time axis everything else already shares (see
+// feedback_timeline_single_source_of_truth). It never touches state.start/
+// end/cuts, winStart/winEnd, zoom, or the video's own currentTime — those
+// stay real/absolute always. It only changes what clipPct() and
+// clipTimeFromEvent() compute with, so toggling it on/off can never leave
+// stale model state behind. realToViewTime collapses every cut fully before
+// t out of the axis (same accumulation pattern as clipMusicOffsetFor);
+// viewToRealTime is its exact inverse, walking cuts in order and expanding
+// back in whichever one first has an unresolved (not-yet-collapsed) start.
+function realToViewTime(t) {
+  const { state } = clipEditor;
+  let removed = 0;
+  for (const c of state.cuts) {
+    if (c.end_time <= t) removed += (c.end_time - c.start_time);
+  }
+  return t - removed;
+}
+
+function viewToRealTime(v) {
+  const { state } = clipEditor;
+  const cuts = state.cuts.slice().sort((a, b) => a.start_time - b.start_time);
+  let removed = 0;
+  for (const c of cuts) {
+    if (v < c.start_time - removed) break;
+    removed += (c.end_time - c.start_time);
+  }
+  return v + removed;
+}
+
+function clipIsInsideCut(t) {
+  return clipEditor.state.cuts.some(c => t >= c.start_time && t < c.end_time);
+}
+
 function clipPct(t, winStart, winEnd) {
+  if (clipEditor && clipEditor.rippleView) {
+    t = realToViewTime(t);
+    winStart = realToViewTime(winStart);
+    winEnd = realToViewTime(winEnd);
+  }
   const span = winEnd - winStart;
   if (span <= 0) return 0;
   return Math.min(100, Math.max(0, ((t - winStart) / span) * 100));
@@ -2811,6 +3569,11 @@ function clipTimeFromEvent(e) {
   const rect = clipModalTrack.getBoundingClientRect();
   const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
   const { winStart, winEnd } = clipEditor;
+  if (clipEditor.rippleView) {
+    const vStart = realToViewTime(winStart);
+    const vEnd = realToViewTime(winEnd);
+    return viewToRealTime(vStart + frac * (vEnd - vStart));
+  }
   return winStart + frac * (winEnd - winStart);
 }
 
@@ -2950,22 +3713,28 @@ function renderClipRange() {
   // whenever state.start/state.end fell outside the zoomed window — the same class
   // of "two independent rendering paths drift apart" bug as the main timeline had,
   // just via percentage-clamping instead of scroll/canvas timing.
-  state.cuts.forEach((c, idx) => {
-    const el = document.createElement('div');
-    el.className = 'clip-cut';
-    const cutLeft = clipPct(c.start_time, winStart, winEnd);
-    const cutRight = clipPct(c.end_time, winStart, winEnd);
-    el.style.left = cutLeft + '%';
-    el.style.width = Math.max(0.3, cutRight - cutLeft) + '%';
-    el.title = 'Click para deshacer este corte';
-    el.addEventListener('mousedown', e => e.stopPropagation());
-    el.addEventListener('click', e => {
-      e.stopPropagation();
-      state.cuts.splice(idx, 1);
-      commitClipHistory();
+  // While ripple view is on, cuts are visually collapsed to zero width by
+  // clipPct itself (same realToViewTime formula), so skip creating the DOM
+  // markers entirely instead of leaving zero-width click targets behind.
+  // Undoing a cut by clicking it still works normally — toggle ripple off first.
+  if (!clipEditor.rippleView) {
+    state.cuts.forEach((c, idx) => {
+      const el = document.createElement('div');
+      el.className = 'clip-cut';
+      const cutLeft = clipPct(c.start_time, winStart, winEnd);
+      const cutRight = clipPct(c.end_time, winStart, winEnd);
+      el.style.left = cutLeft + '%';
+      el.style.width = Math.max(0.3, cutRight - cutLeft) + '%';
+      el.title = 'Click para deshacer este corte';
+      el.addEventListener('mousedown', e => e.stopPropagation());
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        state.cuts.splice(idx, 1);
+        commitClipHistory();
+      });
+      clipModalTrack.appendChild(el);
     });
-    clipModalTrack.appendChild(el);
-  });
+  }
 
   renderCaptionBlocks();
 }
@@ -2989,7 +3758,7 @@ function renderCaptionBlocks() {
     const right = clipPct(block.end + startTime, winStart, winEnd);
     el.style.left = left + '%';
     el.style.width = Math.max(0.3, right - left) + '%';
-    el.textContent = block.words.map(w => w.word.trim()).join(' ');
+    el.textContent = _blockDisplayText(block);
     el.title = el.textContent;
 
     const leftHandle = document.createElement('div');
@@ -3006,6 +3775,28 @@ function renderCaptionBlocks() {
     el.appendChild(rightHandle);
     clipModalCaptionsTrack.appendChild(el);
   });
+  renderMusicTrack();
+}
+
+// Renders the single block representing the selected background music track,
+// spanning the clip's current trim boundaries (state.start/state.end) with
+// the same clipPct(winStart, winEnd) formula as every other lane, so it
+// never drifts out of alignment (see feedback_timeline_single_source_of_truth).
+function renderMusicTrack() {
+  if (!clipEditor) return;
+  clipModalMusicTrack.innerHTML = '';
+  const h = clipEditor.h;
+  if (!h.music_track) return;
+  const { winStart, winEnd, state } = clipEditor;
+  const left = clipPct(state.start, winStart, winEnd);
+  const right = clipPct(state.end, winStart, winEnd);
+  const el = document.createElement('div');
+  el.className = 'music-block';
+  el.style.left = left + '%';
+  el.style.width = Math.max(0.3, right - left) + '%';
+  el.textContent = '♪ ' + h.music_track.replace(/\.[^.]+$/, '');
+  el.title = el.textContent;
+  clipModalMusicTrack.appendChild(el);
 }
 
 function drawClipRuler() {
@@ -3020,10 +3811,14 @@ function drawClipRuler() {
   ctx.clearRect(0, 0, width, height);
   if (!clipEditor) return;
   const { winStart, winEnd } = clipEditor;
-  const span = winEnd - winStart;
+  const ripple = clipEditor.rippleView;
+  const vWinStart = ripple ? realToViewTime(winStart) : winStart;
+  const vWinEnd = ripple ? realToViewTime(winEnd) : winEnd;
+  const span = vWinEnd - vWinStart;
   if (span <= 0) return;
   const pxPerSec = width / span;
   const interval = niceRulerInterval(pxPerSec);
+  const toX = t => ((ripple ? realToViewTime(t) : t) - vWinStart) * pxPerSec;
 
   ctx.strokeStyle = 'rgba(230, 232, 235, 0.35)';
   ctx.fillStyle = 'rgba(230, 232, 235, 0.75)';
@@ -3035,22 +3830,27 @@ function drawClipRuler() {
     // and mark the halfway point of each second with a small dot instead.
     const firstSec = Math.max(0, Math.floor(winStart));
     for (let s = firstSec; s <= winEnd + 1; s++) {
-      const x = (s - winStart) * pxPerSec;
-      ctx.beginPath();
-      ctx.moveTo(x, height - 6);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-      ctx.fillText(fmtRuler(s), x + 3, 1);
+      if (!ripple || !clipIsInsideCut(s)) {
+        const x = toX(s);
+        ctx.beginPath();
+        ctx.moveTo(x, height - 6);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+        ctx.fillText(fmtRuler(s), x + 3, 1);
+      }
 
-      const midX = (s + 0.5 - winStart) * pxPerSec;
-      ctx.beginPath();
-      ctx.arc(midX, height - 3, 1.4, 0, Math.PI * 2);
-      ctx.fill();
+      if (!ripple || !clipIsInsideCut(s + 0.5)) {
+        const midX = toX(s + 0.5);
+        ctx.beginPath();
+        ctx.arc(midX, height - 3, 1.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   } else {
     const firstTick = Math.max(0, Math.floor(winStart / interval)) * interval;
     for (let t = firstTick; t <= winEnd + interval; t += interval) {
-      const x = (t - winStart) * pxPerSec;
+      if (ripple && clipIsInsideCut(t)) continue;
+      const x = toX(t);
       ctx.beginPath();
       ctx.moveTo(x, height - 6);
       ctx.lineTo(x, height);
@@ -3059,11 +3859,12 @@ function drawClipRuler() {
     }
   }
 
-  if (clipEditor.crop && clipEditor.crop.enabled && clipEditor.crop.keyframes.length) {
+  if (clipEditor.crop && clipEditor.crop.enabled && cropKfList().length) {
     ctx.fillStyle = 'rgba(255, 176, 32, 0.9)';
-    clipEditor.crop.keyframes.forEach(k => {
+    cropKfList().forEach(k => {
       if (k.t < winStart || k.t > winEnd) return;
-      const x = (k.t - winStart) * pxPerSec;
+      if (ripple && clipIsInsideCut(k.t)) return;
+      const x = toX(k.t);
       ctx.beginPath();
       ctx.moveTo(x - 4, height);
       ctx.lineTo(x + 4, height);
@@ -3088,17 +3889,21 @@ function drawClipWaveform() {
   if (!clipEditor || !waveformPeaks.length || !duration) return;
 
   const { winStart, winEnd } = clipEditor;
+  const ripple = clipEditor.rippleView;
+  const vWinStart = ripple ? realToViewTime(winStart) : winStart;
+  const vWinEnd = ripple ? realToViewTime(winEnd) : winEnd;
   const n = waveformPeaks.length;
   const pointDuration = duration / n;
   const idxStart = Math.max(0, Math.floor(winStart / pointDuration));
   const idxEnd = Math.min(n, Math.ceil(winEnd / pointDuration));
-  const pxPerSec = width / Math.max(0.001, winEnd - winStart);
+  const pxPerSec = width / Math.max(0.001, vWinEnd - vWinStart);
   const midY = height / 2;
   const barWidth = Math.max(1, pointDuration * pxPerSec);
   ctx.fillStyle = 'rgba(230, 232, 235, 0.28)';
   for (let i = idxStart; i < idxEnd; i++) {
     const t = i * pointDuration;
-    const x = (t - winStart) * pxPerSec;
+    if (ripple && clipIsInsideCut(t)) continue;
+    const x = ((ripple ? realToViewTime(t) : t) - vWinStart) * pxPerSec;
     const h = Math.max(1, waveformPeaks[i] * height * 0.85);
     ctx.fillRect(x, midY - h / 2, Math.max(1, barWidth - 0.5), h);
   }
@@ -3110,25 +3915,72 @@ function drawClipWaveform() {
 // cx/cy are fractions (0-1) of the source video's natural width/height (crop
 // box center), zoom is a UI multiplier where 1 = crop height spans the full
 // natural frame height (least zoomed) and crop width is always derived as
-// crop_height * 9/16. Both the crop-box overlay and the vertical preview
+// crop_height * pane aspect. Both the crop-box overlay and the vertical preview
 // canvas read the exact same interpolated point for clipModalVideo.currentTime,
 // so they can never drift apart from each other.
+//
+// Two framing modes share all of this machinery:
+//   'single' -> h.crop_keyframes, one 9:16 rectangle.
+//   'split'  -> h.split_keyframes, {t, top: {cx,cy,zoom}, bottom: {...}}, two
+//               rectangles cut out of the same wide frame and stacked 50/50.
+// Every function below takes a `pane` of 'top'|'bottom' (ignored in single
+// mode) so there is exactly one code path for both modes — the export side
+// (clipper.crop_clip_manual) mirrors this same maths, which is what makes
+// "lo que ves en el preview es lo que se exporta" true.
+
+function cropMode() {
+  return clipEditor && clipEditor.crop && clipEditor.crop.mode === 'split' ? 'split' : 'single';
+}
+
+// The list the current mode reads and writes. Single and split keyframes are
+// kept side by side, never converted, so switching modes back and forth never
+// destroys the framing already done in the other one.
+function cropKfList() {
+  if (!clipEditor || !clipEditor.crop) return [];
+  return cropMode() === 'split' ? clipEditor.crop.splitKeyframes : clipEditor.crop.keyframes;
+}
+
+function cropPaneAspect() {
+  return cropMode() === 'split' ? CLIP_SPLIT_PANE_ASPECT : CLIP_CROP_ASPECT;
+}
+
+function cropActivePane() {
+  return clipEditor && clipEditor.crop && clipEditor.crop.activePane === 'bottom' ? 'bottom' : 'top';
+}
+
+const CROP_SPEC_DEFAULT = { cx: 0.5, cy: 0.5, zoom: 1 };
+
+// The {cx,cy,zoom} a keyframe holds for one pane. In single mode the spec is
+// the keyframe itself; in split mode it lives under kf.top / kf.bottom.
+function cropSpecOf(kf, pane) {
+  if (!kf) return { ...CROP_SPEC_DEFAULT };
+  if (cropMode() !== 'split') return { cx: kf.cx, cy: kf.cy, zoom: kf.zoom };
+  const spec = kf[pane === 'bottom' ? 'bottom' : 'top'] || CROP_SPEC_DEFAULT;
+  return { cx: spec.cx, cy: spec.cy, zoom: spec.zoom };
+}
+
+function newCropKeyframe(t, fromTop, fromBottom) {
+  if (cropMode() === 'split') {
+    return { t, top: { ...(fromTop || CROP_SPEC_DEFAULT) }, bottom: { ...(fromBottom || CROP_SPEC_DEFAULT) } };
+  }
+  return { t, ...(fromTop || CROP_SPEC_DEFAULT) };
+}
 
 // Corte directo (no paneo): cada keyframe define el encuadre "desde acá hasta
 // el próximo", y al llegar al tiempo del siguiente salta de golpe a su valor.
-function interpolateCropKeyframe(t) {
-  const kfs = (clipEditor && clipEditor.crop ? clipEditor.crop.keyframes : []).slice().sort((a, b) => a.t - b.t);
-  if (!kfs.length) return { cx: 0.5, cy: 0.5, zoom: 1 };
+function interpolateCropKeyframe(t, pane) {
+  const kfs = cropKfList().slice().sort((a, b) => a.t - b.t);
+  if (!kfs.length) return { ...CROP_SPEC_DEFAULT };
   let current = kfs[0];
   for (const kf of kfs) {
     if (kf.t > t) break;
     current = kf;
   }
-  return { cx: current.cx, cy: current.cy, zoom: current.zoom };
+  return cropSpecOf(current, pane || cropActivePane());
 }
 
 function nearestCropKeyframe(t) {
-  const kfs = clipEditor && clipEditor.crop ? clipEditor.crop.keyframes : [];
+  const kfs = cropKfList();
   if (!kfs.length) return null;
   let best = kfs[0], bestDist = Math.abs(kfs[0].t - t);
   for (const k of kfs) {
@@ -3138,24 +3990,50 @@ function nearestCropKeyframe(t) {
   return best;
 }
 
+// Writes one pane's spec into a keyframe, whatever the mode's shape is.
+function setCropSpec(kf, pane, patch) {
+  const target = cropMode() === 'split'
+    ? (kf[pane === 'bottom' ? 'bottom' : 'top'] || (kf[pane === 'bottom' ? 'bottom' : 'top'] = { ...CROP_SPEC_DEFAULT }))
+    : kf;
+  Object.assign(target, patch);
+}
+
 function saveClipCrop() {
   if (!clipEditor) return;
   const { h, crop } = clipEditor;
   h.crop_enabled = crop.enabled;
+  h.crop_mode = crop.mode;
   h.crop_keyframes = crop.keyframes.map(k => ({ ...k }));
+  h.split_keyframes = crop.splitKeyframes.map(k => ({ t: k.t, top: { ...k.top }, bottom: { ...k.bottom } }));
   fetch(`/api/highlights/${h.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ crop_enabled: h.crop_enabled, crop_keyframes: h.crop_keyframes }),
+    body: JSON.stringify({
+      crop_enabled: h.crop_enabled,
+      crop_mode: h.crop_mode,
+      crop_keyframes: h.crop_keyframes,
+      split_keyframes: h.split_keyframes,
+    }),
   }).catch(err => console.error('[editor] failed to save crop', err));
 }
 
 function updateClipCropKfUI() {
   if (!clipEditor) return;
-  const kfs = clipEditor.crop.keyframes;
+  const split = cropMode() === 'split';
+  const kfs = cropKfList();
   clipCropKfCountEl.textContent = kfs.length ? `${kfs.length} punto${kfs.length === 1 ? '' : 's'} clave` : 'sin puntos clave';
   clipCropDelKfBtn.disabled = kfs.length === 0;
   clipCropZoomSlider.value = interpolateCropKeyframe(clipModalVideo.currentTime).zoom;
+  clipModalCropModeGrid.querySelectorAll('[data-crop-mode]').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.cropMode === (split ? 'split' : 'single'));
+  });
+  clipModalCropPaneRow.style.display = split ? '' : 'none';
+  clipModalCropPaneRow.querySelectorAll('[data-crop-pane]').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.cropPane === cropActivePane());
+  });
+  clipCropZoomLabel.textContent = split ? (cropActivePane() === 'bottom' ? 'Zoom abajo' : 'Zoom arriba') : 'Zoom';
+  clipCropHintSingle.style.display = split ? 'none' : '';
+  clipCropHintSplit.style.display = split ? '' : 'none';
 }
 
 // #clip-modal-video uses object-fit:contain, so its clientWidth/clientHeight is
@@ -3182,23 +4060,39 @@ function getClipVideoContentRect() {
 // exact reference frame for the actual displayed frame, letterboxing included.
 function renderClipCropBox() {
   if (!clipEditor || !clipEditor.crop.enabled) return;
+  const split = cropMode() === 'split';
   const vw = clipModalVideo.videoWidth, vh = clipModalVideo.videoHeight;
   const content = getClipVideoContentRect();
   if (!vw || !vh || !content) return;
   const dispW = content.width, dispH = content.height;
-  const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime);
-  const cropH = vh / Math.max(1, zoom);
-  const cropW = cropH * CLIP_CROP_ASPECT;
   const scaleX = dispW / vw, scaleY = dispH / vh;
-  const boxW = cropW * scaleX, boxH = cropH * scaleY;
-  let left = cx * vw * scaleX - boxW / 2;
-  let top = cy * vh * scaleY - boxH / 2;
-  left = Math.min(dispW - boxW, Math.max(0, left));
-  top = Math.min(dispH - boxH, Math.max(0, top));
-  clipModalCropBox.style.left = (clipModalVideo.offsetLeft + content.left + left) + 'px';
-  clipModalCropBox.style.top = (clipModalVideo.offsetTop + content.top + top) + 'px';
-  clipModalCropBox.style.width = boxW + 'px';
-  clipModalCropBox.style.height = boxH + 'px';
+  const aspect = cropPaneAspect();
+  const active = cropActivePane();
+
+  const place = (el, pane) => {
+    const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime, pane);
+    let cropH = vh / Math.max(1, zoom);
+    let cropW = cropH * aspect;
+    if (cropW > vw) { cropW = vw; cropH = cropW / aspect; }
+    const boxW = cropW * scaleX, boxH = cropH * scaleY;
+    let left = cx * vw * scaleX - boxW / 2;
+    let top = cy * vh * scaleY - boxH / 2;
+    left = Math.min(dispW - boxW, Math.max(0, left));
+    top = Math.min(dispH - boxH, Math.max(0, top));
+    el.style.left = (clipModalVideo.offsetLeft + content.left + left) + 'px';
+    el.style.top = (clipModalVideo.offsetTop + content.top + top) + 'px';
+    el.style.width = boxW + 'px';
+    el.style.height = boxH + 'px';
+    el.classList.toggle('split', split);
+    // Only the pane being edited is fully lit, so the zoom slider and the
+    // keyframe buttons always have an unambiguous target on screen.
+    el.classList.toggle('split-idle', split && pane !== active);
+  };
+
+  place(clipModalCropBox, 'top');
+  clipModalCropBox.querySelector('.crop-box-label').textContent = split ? 'Arriba' : '';
+  clipModalCropBox2.classList.toggle('visible', split);
+  if (split) place(clipModalCropBox2, 'bottom');
 }
 
 // Draws straight from the live <video> frame into the preview <canvas> (rather
@@ -3216,14 +4110,32 @@ function drawClipCropPreview() {
   const ctx = clipModalCropCanvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cw, ch);
-  const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime);
-  const cropH = vh / Math.max(1, zoom);
-  const cropW = cropH * CLIP_CROP_ASPECT;
-  let srcX = Math.min(vw - cropW, Math.max(0, cx * vw - cropW / 2));
-  let srcY = Math.min(vh - cropH, Math.max(0, cy * vh - cropH / 2));
-  try {
-    ctx.drawImage(clipModalVideo, srcX, srcY, cropW, cropH, 0, 0, cw, ch);
-  } catch (err) { /* frame not decoded yet */ }
+  const split = cropMode() === 'split';
+  const aspect = cropPaneAspect();
+
+  // One draw per pane: single mode fills the whole preview, split mode draws
+  // the top pane into the upper half and the bottom pane into the lower half —
+  // exactly what ffmpeg's vstack produces on export.
+  const drawPane = (pane, destY, destH) => {
+    const { cx, cy, zoom } = interpolateCropKeyframe(clipModalVideo.currentTime, pane);
+    let cropH = vh / Math.max(1, zoom);
+    let cropW = cropH * aspect;
+    if (cropW > vw) { cropW = vw; cropH = cropW / aspect; }
+    const srcX = Math.min(vw - cropW, Math.max(0, cx * vw - cropW / 2));
+    const srcY = Math.min(vh - cropH, Math.max(0, cy * vh - cropH / 2));
+    try {
+      ctx.drawImage(clipModalVideo, srcX, srcY, cropW, cropH, 0, destY, cw, destH);
+    } catch (err) { /* frame not decoded yet */ }
+  };
+
+  if (split) {
+    const half = ch / 2;
+    drawPane('top', 0, half);
+    drawPane('bottom', half, ch - half);
+  } else {
+    drawPane('top', 0, ch);
+  }
+  clipModalCropPreviewDivider.classList.toggle('visible', split);
 }
 
 clipModalCropSwitch.addEventListener('click', () => {
@@ -3234,28 +4146,82 @@ clipModalCropSwitch.addEventListener('click', () => {
   clipModalCropBox.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalCropPreviewWrap.classList.toggle('visible', clipEditor.crop.enabled);
   clipModalCropResizeHandle.classList.toggle('visible', clipEditor.crop.enabled);
-  if (clipEditor.crop.enabled && clipEditor.crop.keyframes.length === 0) {
-    clipEditor.crop.keyframes.push({ t: clipModalVideo.currentTime, cx: 0.5, cy: 0.5, zoom: 1 });
+  if (!clipEditor.crop.enabled) clipModalCropBox2.classList.remove('visible');
+  if (clipEditor.crop.enabled) ensureCropKeyframe(clipModalVideo.currentTime);
+  updateClipCropKfUI();
+  renderClipCropBox();
+  drawClipCropPreview();
+  updateClipCaptionsOverlay();
+  drawClipRuler();
+  saveClipCrop();
+});
+
+// Every edit (zoom, drag, keyframe) needs *some* keyframe to write into; a crop
+// that was just switched on has none, so the first interaction creates one at
+// the playhead rather than silently doing nothing.
+function ensureCropKeyframe(t, exact) {
+  const list = cropKfList();
+  if (!list.length) {
+    const kf = newCropKeyframe(t);
+    list.push(kf);
+    return kf;
+  }
+  if (exact) {
+    const near = list.find(k => Math.abs(k.t - t) < 0.05);
+    if (near) return near;
+    const kf = newCropKeyframe(t, interpolateCropKeyframe(t, 'top'), interpolateCropKeyframe(t, 'bottom'));
+    list.push(kf);
+    return kf;
+  }
+  return nearestCropKeyframe(t);
+}
+
+clipModalCropModeGrid.addEventListener('click', e => {
+  const chip = e.target.closest('[data-crop-mode]');
+  if (!chip || !clipEditor || !clipEditor.crop.enabled) return;
+  const mode = chip.dataset.cropMode === 'split' ? 'split' : 'single';
+  if (mode === clipEditor.crop.mode) return;
+  clipEditor.crop.mode = mode;
+  // Seed the mode's own list the first time it is used: two panes framed on the
+  // upper and lower halves of the source read as an obvious starting point for
+  // a two-camera shot, instead of both panes showing the same thing.
+  if (mode === 'split' && !clipEditor.crop.splitKeyframes.length) {
+    clipEditor.crop.splitKeyframes.push({
+      t: clipEditor.state.start,
+      top: { cx: 0.5, cy: 0.35, zoom: 1.6 },
+      bottom: { cx: 0.5, cy: 0.65, zoom: 1.6 },
+    });
+  }
+  if (mode === 'single' && !clipEditor.crop.keyframes.length) {
+    clipEditor.crop.keyframes.push({ t: clipEditor.state.start, cx: 0.5, cy: 0.5, zoom: 1 });
   }
   updateClipCropKfUI();
   renderClipCropBox();
   drawClipCropPreview();
+  updateClipCaptionsOverlay();
   drawClipRuler();
   saveClipCrop();
+});
+
+clipModalCropPaneRow.addEventListener('click', e => {
+  const chip = e.target.closest('[data-crop-pane]');
+  if (!chip || !clipEditor) return;
+  clipEditor.crop.activePane = chip.dataset.cropPane === 'bottom' ? 'bottom' : 'top';
+  updateClipCropKfUI();
+  renderClipCropBox();
 });
 
 clipCropZoomSlider.addEventListener('input', () => {
   if (!clipEditor || !clipEditor.crop.enabled) return;
   const z = parseFloat(clipCropZoomSlider.value);
-  let kf = nearestCropKeyframe(clipModalVideo.currentTime);
-  if (!kf) {
-    kf = { t: clipModalVideo.currentTime, cx: 0.5, cy: 0.5, zoom: z };
-    clipEditor.crop.keyframes.push(kf);
+  const had = cropKfList().length;
+  const kf = ensureCropKeyframe(clipModalVideo.currentTime);
+  if (!kf) return;
+  setCropSpec(kf, cropActivePane(), { zoom: z });
+  if (!had) {
     clipCropKfCountEl.textContent = '1 punto clave';
     clipCropDelKfBtn.disabled = false;
     drawClipRuler();
-  } else {
-    kf.zoom = z;
   }
   renderClipCropBox();
   drawClipCropPreview();
@@ -3265,12 +4231,12 @@ clipCropZoomSlider.addEventListener('change', () => { if (clipEditor) saveClipCr
 clipCropAddKfBtn.addEventListener('click', () => {
   if (!clipEditor || !clipEditor.crop.enabled) return;
   const t = clipModalVideo.currentTime;
-  const cur = interpolateCropKeyframe(t);
-  const existing = clipEditor.crop.keyframes.find(k => Math.abs(k.t - t) < 0.05);
-  if (existing) {
-    existing.cx = cur.cx; existing.cy = cur.cy; existing.zoom = cur.zoom;
-  } else {
-    clipEditor.crop.keyframes.push({ t, cx: cur.cx, cy: cur.cy, zoom: cur.zoom });
+  const kf = ensureCropKeyframe(t, true);
+  // Re-clicking on an existing keyframe re-stamps it with whatever is on
+  // screen right now, so the button is never a no-op.
+  if (kf && Math.abs(kf.t - t) < 0.05) {
+    setCropSpec(kf, 'top', interpolateCropKeyframe(t, 'top'));
+    if (cropMode() === 'split') setCropSpec(kf, 'bottom', interpolateCropKeyframe(t, 'bottom'));
   }
   updateClipCropKfUI();
   renderClipCropBox();
@@ -3283,7 +4249,9 @@ clipCropDelKfBtn.addEventListener('click', () => {
   if (!clipEditor) return;
   const kf = nearestCropKeyframe(clipModalVideo.currentTime);
   if (!kf) return;
-  clipEditor.crop.keyframes = clipEditor.crop.keyframes.filter(k => k !== kf);
+  const filtered = cropKfList().filter(k => k !== kf);
+  if (cropMode() === 'split') clipEditor.crop.splitKeyframes = filtered;
+  else clipEditor.crop.keyframes = filtered;
   updateClipCropKfUI();
   renderClipCropBox();
   drawClipCropPreview();
@@ -3297,20 +4265,23 @@ clipCropDelKfBtn.addEventListener('click', () => {
 // on mouseup ("save on release", not on every intermediate frame).
 let clipCropDragging = null; // 'move' | 'resize'
 let clipCropDragKf = null;
+let clipCropDragPane = 'top';
 
-function startClipCropDrag(mode) {
+function startClipCropDrag(mode, pane) {
   if (!clipEditor || !clipEditor.crop.enabled) return;
   const t = clipModalVideo.currentTime;
-  let kf = nearestCropKeyframe(t);
-  if (!kf) {
-    const cur = interpolateCropKeyframe(t);
-    kf = { t, cx: cur.cx, cy: cur.cy, zoom: cur.zoom };
-    clipEditor.crop.keyframes.push(kf);
+  const had = cropKfList().length;
+  const kf = ensureCropKeyframe(t);
+  if (!kf) return;
+  if (!had) { updateClipCropKfUI(); drawClipRuler(); }
+  // Grabbing a box also makes it the pane the zoom slider and labels talk about.
+  if (cropMode() === 'split' && clipEditor.crop.activePane !== pane) {
+    clipEditor.crop.activePane = pane;
     updateClipCropKfUI();
-    drawClipRuler();
   }
   clipCropDragging = mode;
   clipCropDragKf = kf;
+  clipCropDragPane = pane;
   window.addEventListener('mousemove', onClipCropDrag);
   window.addEventListener('mouseup', endClipCropDrag);
 }
@@ -3328,22 +4299,26 @@ function onClipCropDrag(e) {
     height: content.height,
   };
   const scaleX = rect.width / vw, scaleY = rect.height / vh;
+  const aspect = cropPaneAspect();
   const kf = clipCropDragKf;
+  const pane = clipCropDragPane;
+  const spec = cropSpecOf(kf, pane);
   if (clipCropDragging === 'move') {
-    const cropH = vh / Math.max(1, kf.zoom);
-    const cropW = cropH * CLIP_CROP_ASPECT;
+    let cropH = vh / Math.max(1, spec.zoom);
+    let cropW = cropH * aspect;
+    if (cropW > vw) { cropW = vw; cropH = cropW / aspect; }
     let cxPx = (e.clientX - rect.left) / scaleX;
     let cyPx = (e.clientY - rect.top) / scaleY;
     cxPx = Math.min(vw - cropW / 2, Math.max(cropW / 2, cxPx));
     cyPx = Math.min(vh - cropH / 2, Math.max(cropH / 2, cyPx));
-    kf.cx = cxPx / vw;
-    kf.cy = cyPx / vh;
+    setCropSpec(kf, pane, { cx: cxPx / vw, cy: cyPx / vh });
   } else {
-    const centerYpx = kf.cy * vh * scaleY + rect.top;
+    const centerYpx = spec.cy * vh * scaleY + rect.top;
     const halfHeightPx = Math.max(10, e.clientY - centerYpx);
     const newCropH = Math.min(vh, Math.max(vh / 4, (halfHeightPx * 2) / scaleY));
-    kf.zoom = Math.min(4, Math.max(1, vh / newCropH));
-    clipCropZoomSlider.value = kf.zoom;
+    const zoom = Math.min(4, Math.max(1, vh / newCropH));
+    setCropSpec(kf, pane, { zoom });
+    if (pane === cropActivePane()) clipCropZoomSlider.value = zoom;
   }
   renderClipCropBox();
   drawClipCropPreview();
@@ -3357,16 +4332,19 @@ function endClipCropDrag() {
   if (clipEditor) saveClipCrop();
 }
 
-clipModalCropBox.addEventListener('mousedown', e => {
-  if (e.target.closest('.crop-handle')) return;
-  e.preventDefault();
-  e.stopPropagation();
-  startClipCropDrag('move');
-});
-clipModalCropBox.querySelector('.crop-handle').addEventListener('mousedown', e => {
-  e.preventDefault();
-  e.stopPropagation();
-  startClipCropDrag('resize');
+[clipModalCropBox, clipModalCropBox2].forEach(box => {
+  const pane = box.dataset.pane === 'bottom' ? 'bottom' : 'top';
+  box.addEventListener('mousedown', e => {
+    if (e.target.closest('.crop-handle')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startClipCropDrag('move', pane);
+  });
+  box.querySelector('.crop-handle').addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    startClipCropDrag('resize', pane);
+  });
 });
 
 function startClipTrim(e, field) {
@@ -3619,6 +4597,15 @@ clipModalPlayhead.addEventListener('mousedown', e => {
   window.addEventListener('mouseup', onUp);
 });
 
+clipHideCutsBtn.addEventListener('click', () => {
+  if (!clipEditor) return;
+  clipEditor.rippleView = !clipEditor.rippleView;
+  clipHideCutsBtn.classList.toggle('active', clipEditor.rippleView);
+  clipHideCutsBtn.textContent = clipEditor.rippleView ? 'Mostrar cortes' : 'Ocultar cortes';
+  renderClipRange();
+  drawClipWaveform();
+});
+
 clipCutBtn.addEventListener('click', () => {
   if (!clipEditor || !clipEditor.pendingSelection) return;
   const { state } = clipEditor;
@@ -3649,6 +4636,29 @@ clipSilenceBtn.addEventListener('click', async () => {
   } finally {
     clipSilenceBtn.disabled = false;
     clipSilenceBtn.textContent = original;
+  }
+});
+
+clipFillerBtn.addEventListener('click', async () => {
+  if (!clipEditor) return;
+  const { state } = clipEditor;
+  clipFillerBtn.disabled = true;
+  const original = clipFillerBtn.textContent;
+  clipFillerBtn.textContent = 'Buscando muletillas…';
+  try {
+    const res = await fetch(`/api/detect_fillers?start=${state.start}&end=${state.end}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'error');
+    const gaps = data.gaps || [];
+    if (gaps.length) {
+      state.cuts = normalizeCuts([...state.cuts, ...gaps], state.start, state.end);
+      commitClipHistory();
+    }
+  } catch (err) {
+    console.error('[editor] failed to detect fillers', err);
+  } finally {
+    clipFillerBtn.disabled = false;
+    clipFillerBtn.textContent = original;
   }
 });
 
@@ -3725,10 +4735,12 @@ clipModalVideo.addEventListener('timeupdate', () => {
   const { state } = clipEditor;
   const t0 = clipModalVideo.currentTime;
   const activeCut = state.cuts.find(c => t0 >= c.start_time && t0 < c.end_time);
-  if (activeCut) clipModalVideo.currentTime = activeCut.end_time;
+  if (activeCut) { clipInternalSeek = true; clipModalVideo.currentTime = activeCut.end_time; }
   if (clipModalVideo.currentTime < state.start) {
+    clipInternalSeek = true;
     clipModalVideo.currentTime = state.start;
   } else if (clipModalVideo.currentTime >= state.end) {
+    clipInternalSeek = true;
     clipModalVideo.currentTime = state.end;
     clipModalVideo.pause();
   }
@@ -3775,10 +4787,54 @@ function clipCaptionsRafTick() {
 clipModalVideo.addEventListener('play', () => {
   clipModalPlayBtn.innerHTML = '&#10074;&#10074;';
   if (clipCaptionsRafId == null) clipCaptionsRafId = requestAnimationFrame(clipCaptionsRafTick);
+  if (clipEditor && clipEditor.h.music_track) {
+    syncClipMusicAudio();
+    clipModalMusicAudio.volume = clipEditor.h.music_volume ?? DEFAULT_MUSIC_VOLUME;
+    clipModalMusicAudio.play().catch(err => console.error('[editor] music preview play failed', err));
+  }
 });
 clipModalVideo.addEventListener('pause', () => {
   clipModalPlayBtn.innerHTML = '&#9654;';
   if (clipCaptionsRafId != null) { cancelAnimationFrame(clipCaptionsRafId); clipCaptionsRafId = null; }
+  clipModalMusicAudio.pause();
+});
+// Maps a raw source-time position to the music's own offset: elapsed clip
+// time minus every cut fully behind it (cuts don't exist in the final output,
+// so the music must not jump when live playback skips over one — it only
+// jumps on a real seek), divided by speed (export mixes music at 1x onto the
+// already-sped-up final clip, so 1 real second of sped-up preview playback
+// must also advance the music by exactly 1 real second).
+function clipMusicOffsetFor(t) {
+  const { state, h } = clipEditor;
+  let removed = 0;
+  for (const c of state.cuts) {
+    if (c.end_time <= t) removed += (c.end_time - c.start_time);
+  }
+  return (t - state.start - removed) / (h.speed || 1.0);
+}
+// Keeps the preview <audio> lined up with the video on a real seek (track
+// click, playhead drag, loop restart) — NOT on our own cut-skip/clamp writes
+// (see clipInternalSeek), which must leave the music playing untouched so it
+// doesn't audibly jump when the video ripples over a removed silence.
+function syncClipMusicAudio() {
+  if (!clipEditor || !clipEditor.h.music_track) return;
+  const dur = clipModalMusicAudio.duration;
+  if (!dur || !isFinite(dur)) return;
+  let t = clipMusicOffsetFor(clipModalVideo.currentTime) % dur;
+  if (t < 0) t += dur;
+  if (Math.abs(clipModalMusicAudio.currentTime - t) > 0.15) {
+    clipModalMusicAudio.currentTime = t;
+  }
+}
+clipModalVideo.addEventListener('seeked', () => {
+  if (clipInternalSeek) { clipInternalSeek = false; return; }
+  syncClipMusicAudio();
+});
+clipModalMusicAudio.addEventListener('loadedmetadata', () => {
+  if (clipEditor && clipEditor.h.music_track && !clipModalVideo.paused) {
+    syncClipMusicAudio();
+    clipModalMusicAudio.play().catch(err => console.error('[editor] music preview play failed', err));
+  }
 });
 
 function toggleClipPlayback() {

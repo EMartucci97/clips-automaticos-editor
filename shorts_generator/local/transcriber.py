@@ -111,6 +111,34 @@ def _resolve_device() -> str:
     return "cpu"
 
 
+def _dedupe_word_timestamps(words: list, min_dur: float = 0.02) -> None:
+    """faster-whisper's word-level alignment can collapse two or more
+    consecutive words onto the exact same (start, end) span -- typically
+    zero-duration -- when speech is fast enough (seen e.g. on "bien.
+    ¿Vendías" both landing on 181.24:181.24). Anything downstream that
+    identifies a word by its own (start, end) -- notably the editor's manual
+    transcript_overrides, keyed by `"start:end"`, and the clip-cuts remapper
+    (`editing.remap_words_across_cuts`, which drops any word whose span
+    collapses to zero duration) -- then either can't tell the words apart or
+    silently discards one outright. Enforce strictly increasing,
+    non-overlapping timestamps in-place so every word keeps a unique,
+    non-zero-duration key.
+
+    Must run over the FULL, flattened word list (all segments concatenated,
+    in order) rather than one segment at a time: a zero-duration word can be
+    the very FIRST word of its segment (so it has no "previous word" to
+    compare against within that segment -- exactly what happened with
+    "¿Vendías" opening the segment right after "bien." closed the one
+    before it), in which case a per-segment pass silently skips it."""
+    for i, cur in enumerate(words):
+        if i > 0:
+            prev = words[i - 1]
+            if cur["start"] < prev["end"]:
+                cur["start"] = prev["end"]
+        if cur["end"] <= cur["start"]:
+            cur["end"] = cur["start"] + min_dur
+
+
 def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
     """Run faster-whisper on a local file path, caching the result as .srt
     (+ a sidecar .words.json with word-level timestamps for subtitles)."""
@@ -184,10 +212,17 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
             "end": float(s.end),
             "text": (s.text or "").strip(),
         })
-        words_by_segment.append([
+        words = [
             {"start": float(w.start), "end": float(w.end), "word": w.word.strip()}
             for w in (s.words or [])
-        ])
+        ]
+        words_by_segment.append(words)
+
+    # Dedupe across the whole transcript at once (not per-segment) so a
+    # collision spanning a segment boundary -- like a zero-duration word
+    # opening a new segment right after the previous segment's last word --
+    # still gets caught; see _dedupe_word_timestamps's docstring.
+    _dedupe_word_timestamps([w for words in words_by_segment for w in words])
 
     duration = float(getattr(info, "duration", 0.0)) or (segments[-1]["end"] if segments else 0.0)
     print(f"[transcribe/local] {len(segments)} segments, {duration:.0f}s of audio", flush=True)

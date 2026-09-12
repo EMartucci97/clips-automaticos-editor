@@ -15,10 +15,11 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, abort
 
 from shorts_generator.config import LOCAL_OUTPUT_DIR
 from shorts_generator.highlights import _parse_json_loose, get_highlights
+from shorts_generator.local import clipper, editing
 from shorts_generator.local.diarizer import (
     OTHER_LABEL,
     ROBERTO_LABEL,
@@ -31,11 +32,31 @@ from shorts_generator.local.subtitles import (
     CAPTION_POSITIONS,
     CAPTION_SIZES,
     CAPTION_STYLES,
+    DEFAULT_CAPTION_COLOR,
+    DEFAULT_CAPTION_POSITION,
+    DEFAULT_CAPTION_STYLE,
+    DEFAULT_FONT_KEY,
+    DEFAULT_WORDS_PER_GROUP,
     FONT_CHOICES,
+    _llm_cleanup_words,
     _llm_group_words,
+    burn_subtitles,
     words_for_window,
 )
 from shorts_generator.local.transcriber import transcribe_local
+
+EXPORT_ASPECT_RATIO = "9:16"
+
+# Vertical framing modes offered by the editor's "Encuadre" panel:
+# "single" = one 9:16 rectangle, "split" = two rectangles stacked 50/50
+# (top camera / bottom camera), both cropped out of the same wide source.
+CROP_MODES = ("single", "split")
+DEFAULT_CROP_MODE = "single"
+
+MUSIC_DIR = Path(__file__).resolve().parent / "assets" / "music"
+DEFAULT_MUSIC_VOLUME = 0.18
+CTA_OUTRO_DURATION_SECONDS = 6.5
+CTA_OUTRO_BLUR_SIGMA = 22.0
 
 app = Flask(__name__)
 
@@ -44,6 +65,7 @@ NUM_CLIPS = 20
 
 _TRANSCRIPT_CACHE = None
 _DIARIZED_TRANSCRIPT_CACHE = None
+_CLEANED_WORDS_CACHE: dict = {}
 
 SEGMENT_ANALYSIS_PROMPT = """Sos un editor de video que analiza un tramo de transcripción de una entrevista/podcast en español.
 
@@ -284,15 +306,31 @@ def _word_key(start: float, end: float) -> str:
 def _apply_transcript_overrides(transcript: dict, overrides: dict) -> None:
     """Patch manual corrections (text and/or speaker) onto the matching
     words in-place, keyed by each word's own original absolute timestamps
-    so overrides survive regardless of segment/word indexing."""
+    so overrides survive regardless of segment/word indexing.
+
+    Whisper's word-level alignment occasionally collapses two different
+    consecutive words onto the exact same (start, end) span (a real
+    transcription artifact on fast speech -- new transcriptions are now
+    de-duped in transcriber.py, but already-cached transcripts and any other
+    future edge case can still produce one). If that happens, a single
+    override keyed by that shared timestamp must never be allowed to apply
+    to more than one word -- that's what silently duplicated "bien" onto
+    "¿Vendías" in production. Consume each override key at most once, in
+    transcript order, so a collision degrades to "one word not patched"
+    instead of "wrong word overwritten"."""
     words_overrides = overrides.get("words") or {}
     if not words_overrides:
         return
+    consumed = set()
     for seg in transcript.get("segments", []):
         for w in seg.get("words", []) or []:
-            entry = words_overrides.get(_word_key(w["start"], w["end"]))
+            key = _word_key(w["start"], w["end"])
+            if key in consumed:
+                continue
+            entry = words_overrides.get(key)
             if not entry:
                 continue
+            consumed.add(key)
             if "text" in entry:
                 w["word"] = entry["text"]
             if "speaker" in entry:
@@ -452,6 +490,19 @@ def api_transcript_range():
     return jsonify({"text": text})
 
 
+def _get_cleaned_words(source_words: list, start: float, end: float) -> list:
+    """Cleaned version (Whisper mis-hear fixes, spoken numbers -> digits) of
+    a words_for_window window, via the same _llm_cleanup_words pass
+    build_ass runs before burning the real export -- cached in-memory by
+    (start, end) so /api/captions_range and /api/caption_groups, which are
+    always requested for the same window back-to-back, share one LLM call
+    instead of duplicating it."""
+    key = (start, end)
+    if key not in _CLEANED_WORDS_CACHE:
+        _CLEANED_WORDS_CACHE[key] = _llm_cleanup_words(source_words)
+    return _CLEANED_WORDS_CACHE[key]
+
+
 @app.route("/api/captions_range", methods=["GET"])
 def api_captions_range():
     try:
@@ -462,20 +513,23 @@ def api_captions_range():
 
     transcript = _get_diarized_transcript(SOURCE_PATH)
     words = words_for_window(transcript.get("segments", []), start, end)
-    return jsonify({"words": words})
+    cleaned_words = _get_cleaned_words(words, start, end)
+    return jsonify({"words": words, "cleaned_words": cleaned_words})
 
 
 @app.route("/api/caption_groups", methods=["GET"])
 def api_caption_groups():
     """Real caption-box boundaries for the editor's live preview, computed
-    the same way the final render decides them (subtitles._llm_group_words:
-    an LLM pass that reads for coherent phrases), not the JS mechanical
-    fallback groupCaptionBoundaries() -- that fallback only breaks on
-    punctuation, and this project's transcripts carry none, so it always
-    degraded to a fixed-size hard cap and never actually showed phrase-level
-    grouping. Indices are into the same word list /api/captions_range
-    returns for this start/end (no LLM cleanup pass here), so the editor can
-    line group boundaries up with the words it already has."""
+    the same way the final render decides them (subtitles.build_ass: first
+    _llm_cleanup_words, then _llm_group_words on the cleaned tokens), not the
+    JS mechanical fallback groupCaptionBoundaries() -- that fallback only
+    breaks on punctuation, and this project's transcripts carry none, so it
+    always degraded to a fixed-size hard cap and never actually showed
+    phrase-level grouping. Indices are into the RAW word list
+    /api/captions_range returns for this start/end (not the cleaned one),
+    so the editor's caption-block drag/timing system -- which only knows how
+    to address raw, one-object-per-original-word entries -- can keep using
+    these boundaries to slice clipEditor.captionWords unchanged."""
     try:
         start = float(request.args.get("start", 0))
         end = float(request.args.get("end", 0))
@@ -800,10 +854,136 @@ def api_detect_silences():
     return jsonify({"gaps": gaps})
 
 
+@app.route("/api/detect_fillers", methods=["GET"])
+def api_detect_fillers():
+    """Filler-word ('muletilla') detection for the clip editor's 'quitar
+    muletillas' tool. Reuses editing.find_filler_cuts() -- the same
+    conservative LLM pass (FILLER_PROMPT) the full batch pipeline runs under
+    LOCAL_TRIM_FILLERS_ENABLED -- so the editor's interactive cuts match
+    what a from-scratch render would flag. Returns gaps in the same
+    absolute-time {start_time, end_time} shape as /api/detect_silences, so
+    the client can merge them into the same state.cuts list and everything
+    downstream (export, live-preview cut-skipping, caption remap) works
+    unchanged."""
+    try:
+        start = float(request.args.get("start", 0))
+        end = float(request.args.get("end", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid start/end"}), 400
+    if end <= start:
+        return jsonify({"error": "end must be after start"}), 400
+
+    transcript = _get_transcript(SOURCE_PATH)
+    words = []
+    for seg in transcript.get("segments", []):
+        if seg["end"] < start or seg["start"] > end:
+            continue
+        for w in (seg.get("words") or []):
+            if w["end"] >= start and w["start"] <= end:
+                words.append(w)
+    words.sort(key=lambda w: w["start"])
+
+    cuts = editing.find_filler_cuts(words)
+    gaps = [
+        {"start_time": round(s, 2), "end_time": round(e, 2)}
+        for s, e in cuts
+        if e - s > 0.02
+    ]
+    return jsonify({"gaps": gaps})
+
+
 @app.route("/api/highlights", methods=["GET"])
 def api_highlights():
     highlights = _load_or_build_highlights(SOURCE_PATH)
     return jsonify(highlights)
+
+
+@app.route("/api/music_tracks", methods=["GET"])
+def api_music_tracks():
+    if not MUSIC_DIR.is_dir():
+        return jsonify([])
+    tracks = sorted(p.name for p in MUSIC_DIR.iterdir() if p.suffix.lower() in (".mp3", ".wav", ".m4a"))
+    return jsonify(tracks)
+
+
+@app.route("/api/music_tracks/<path:filename>", methods=["GET"])
+def api_music_track_file(filename):
+    # Serves the raw track for in-browser preview playback (mixed client-side
+    # with the <video>, since the real mix only happens server-side on export).
+    path = (MUSIC_DIR / filename).resolve()
+    if MUSIC_DIR.resolve() not in path.parents or not path.is_file():
+        abort(404)
+    return send_file(path)
+
+
+# A preset is a named bundle of the look-and-feel settings a clip is exported
+# with. Fields mirror the ones api_patch_highlight accepts; applying a preset in
+# the editor replays them through that same PATCH, so validation lives there.
+PRESET_FIELDS = (
+    "caption_style",
+    "font",
+    "caption_color",
+    "caption_size",
+    "caption_position",
+    "caption_words",
+    "captions_enabled",
+    "speed",
+    "music_track",
+    "music_volume",
+)
+_presets_lock = threading.Lock()
+
+
+def _presets_path() -> Path:
+    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+    return Path(LOCAL_OUTPUT_DIR) / "clip_presets.json"
+
+
+def _load_presets() -> dict:
+    path = _presets_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+@app.route("/api/presets", methods=["GET"])
+def api_presets():
+    presets = _load_presets()
+    return jsonify([{"name": name, "settings": presets[name]} for name in sorted(presets)])
+
+
+@app.route("/api/presets/<path:name>", methods=["PUT"])
+def api_put_preset(name):
+    clean_name = str(name).strip()
+    if not clean_name or len(clean_name) > 60:
+        return jsonify({"error": "invalid preset name"}), 400
+    body = request.get_json(force=True) or {}
+    settings = {k: body[k] for k in PRESET_FIELDS if k in body}
+    if not settings:
+        return jsonify({"error": "no preset fields in body"}), 400
+
+    with _presets_lock:
+        presets = _load_presets()
+        presets[clean_name] = settings
+        _atomic_write_json(_presets_path(), presets)
+    return jsonify({"name": clean_name, "settings": settings})
+
+
+@app.route("/api/presets/<path:name>", methods=["DELETE"])
+def api_delete_preset(name):
+    clean_name = str(name).strip()
+    with _presets_lock:
+        presets = _load_presets()
+        if clean_name not in presets:
+            return jsonify({"error": f"preset '{clean_name}' not found"}), 404
+        presets.pop(clean_name)
+        _atomic_write_json(_presets_path(), presets)
+    return jsonify({"deleted": clean_name})
 
 
 @app.route("/api/highlights/<int:highlight_id>", methods=["PATCH"])
@@ -883,6 +1063,30 @@ def api_patch_highlight(highlight_id):
                 }
                 for k in body["crop_keyframes"]
             ]
+        if "crop_mode" in body:
+            crop_mode = str(body["crop_mode"])
+            if crop_mode not in CROP_MODES:
+                return jsonify({"error": f"unknown crop_mode '{crop_mode}'"}), 400
+            match["crop_mode"] = crop_mode
+        if "split_keyframes" in body:
+            match["split_keyframes"] = [
+                {
+                    "t": float(k["t"]),
+                    "top": _pane_spec(k.get("top")),
+                    "bottom": _pane_spec(k.get("bottom")),
+                }
+                for k in body["split_keyframes"]
+            ]
+        if "music_track" in body:
+            track = body["music_track"]
+            if track:
+                if not (MUSIC_DIR / str(track)).is_file():
+                    return jsonify({"error": f"unknown music_track '{track}'"}), 400
+                match["music_track"] = str(track)
+            else:
+                match.pop("music_track", None)
+        if "music_volume" in body:
+            match["music_volume"] = max(0.0, min(1.0, float(body["music_volume"])))
         if "caption_time_overrides" in body:
             match["caption_time_overrides"] = [
                 {
@@ -897,6 +1101,154 @@ def api_patch_highlight(highlight_id):
         _atomic_write_json(cache_path, highlights)
 
     return jsonify(match)
+
+
+def _pane_spec(raw) -> dict:
+    """One split-screen pane's framing, clamped to the ranges the editor's
+    crop box can actually produce: cx/cy are 0-1 fractions of the source
+    frame (box centre) and zoom is the 1-4 UI multiplier."""
+    raw = raw or {}
+    return {
+        "cx": max(0.0, min(1.0, float(raw.get("cx", 0.5)))),
+        "cy": max(0.0, min(1.0, float(raw.get("cy", 0.5)))),
+        "zoom": max(1.0, min(4.0, float(raw.get("zoom", 1.0)))),
+    }
+
+
+def _manual_crop_keyframes(h: dict):
+    """(mode, keyframes) for this highlight's manual framing, or (mode, [])
+    when it has none and the automatic face-tracking reframe should run
+    instead."""
+    mode = h.get("crop_mode", DEFAULT_CROP_MODE)
+    if mode not in CROP_MODES:
+        mode = DEFAULT_CROP_MODE
+    key = "split_keyframes" if mode == "split" else "crop_keyframes"
+    return mode, list(h.get(key) or [])
+
+
+def _export_output_path(source_path: str, highlight_id: int) -> Path:
+    stem = Path(source_path).stem
+    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+    return Path(LOCAL_OUTPUT_DIR) / f"{stem}.clip{highlight_id}.mp4"
+
+
+@app.route("/api/highlights/<int:highlight_id>/export", methods=["POST"])
+def api_export_highlight(highlight_id):
+    """Real render of one highlight, applying every setting the editor
+    persists for it (cuts, captions incl. the LLM number/time cleanup that
+    burn_subtitles runs by default, speed) -- mirrors dashboard.py's
+    working 'Regenerar clip' flow (lines ~590-650) so settings configured
+    here actually reach a real output video instead of only living in the
+    highlights JSON cache."""
+    cache_path = _highlights_cache_path(SOURCE_PATH)
+    with _highlights_lock:
+        if not cache_path.exists():
+            return jsonify({"error": "no highlights cached yet"}), 404
+        with open(cache_path) as f:
+            highlights = json.load(f)
+        h = next((x for x in highlights if x.get("id") == highlight_id), None)
+        if h is None:
+            return jsonify({"error": f"highlight {highlight_id} not found"}), 404
+        h = dict(h)  # snapshot -- render below can take a while
+
+    start_time = float(h["start_time"])
+    end_time = float(h["end_time"])
+    duration = end_time - start_time
+    if duration <= 0:
+        return jsonify({"error": "invalid start_time/end_time"}), 400
+
+    out_path = str(_export_output_path(SOURCE_PATH, highlight_id))
+
+    cut_segments = [
+        (float(c["start_time"]) - start_time, float(c["end_time"]) - start_time)
+        for c in h.get("cuts", [])
+    ]
+    cut_segments = [(s, e) for s, e in cut_segments if e > s] or None
+
+    crop_enabled = bool(h.get("crop_enabled", False))
+    crop_mode, manual_keyframes = _manual_crop_keyframes(h)
+
+    try:
+        if crop_enabled and manual_keyframes:
+            # The editor's own rectangles win: what the vertical preview shows
+            # is what gets rendered. Automatic active-speaker tracking below is
+            # only the fallback for a clip whose crop was switched on but never
+            # framed by hand.
+            clipper.crop_clip_manual(
+                SOURCE_PATH, start_time, end_time, EXPORT_ASPECT_RATIO, out_path,
+                keyframes=manual_keyframes,
+                mode=crop_mode,
+                cut_segments=cut_segments,
+            )
+        else:
+            clipper.crop_clip_local(
+                SOURCE_PATH, start_time, end_time, EXPORT_ASPECT_RATIO, out_path,
+                cut_segments=cut_segments,
+                crop_enabled=crop_enabled,
+            )
+
+        if h.get("captions_enabled", True):
+            transcript = _get_diarized_transcript(SOURCE_PATH)
+            words = words_for_window(
+                transcript.get("segments", []), start_time, end_time,
+                time_overrides=h.get("caption_time_overrides"),
+            )
+            if cut_segments:
+                keep = editing.keep_segments_from_cuts(cut_segments, duration)
+                words = editing.remap_words_across_cuts(words, keep)
+
+            font_key = h.get("font", DEFAULT_FONT_KEY)
+            caption_size = h.get("caption_size", "m")
+            tmp_subbed = out_path + ".subbed.mp4"
+            burn_subtitles(
+                out_path, words, tmp_subbed,
+                font_name=FONT_CHOICES.get(font_key, FONT_CHOICES[DEFAULT_FONT_KEY]),
+                size=CAPTION_SIZES.get(caption_size, CAPTION_SIZES["m"]),
+                position=h.get("caption_position", DEFAULT_CAPTION_POSITION),
+                style=h.get("caption_style", DEFAULT_CAPTION_STYLE),
+                color=h.get("caption_color", DEFAULT_CAPTION_COLOR),
+                words_per_group=h.get("caption_words", DEFAULT_WORDS_PER_GROUP),
+            )
+            os.replace(tmp_subbed, out_path)
+
+        speed = float(h.get("speed", 1.0))
+        if speed != 1.0:
+            tmp_sped = out_path + ".sped.mp4"
+            clipper.apply_speed_local(out_path, speed, tmp_sped)
+            os.replace(tmp_sped, out_path)
+
+        source_duration = clipper._ffprobe_duration(SOURCE_PATH)
+        cta_duration = min(CTA_OUTRO_DURATION_SECONDS, max(source_duration - end_time, 0))
+        if cta_duration >= 0.5:
+            tmp_carded = out_path + ".carded.mp4"
+            clipper.append_blurred_cta_outro(
+                out_path, SOURCE_PATH, end_time, tmp_carded,
+                duration=cta_duration, blur_sigma=CTA_OUTRO_BLUR_SIGMA,
+            )
+            os.replace(tmp_carded, out_path)
+
+        music_track = h.get("music_track")
+        if music_track:
+            music_path = MUSIC_DIR / str(music_track)
+            if not music_path.is_file():
+                return jsonify({"error": f"music track not found: {music_track}"}), 400
+            volume = float(h.get("music_volume", DEFAULT_MUSIC_VOLUME))
+            tmp_mixed = out_path + ".mixed.mp4"
+            clipper.mix_background_music(out_path, str(music_path), volume, tmp_mixed)
+            os.replace(tmp_mixed, out_path)
+    except Exception as exc:
+        print(f"[editor] export failed for highlight {highlight_id}: {exc!r}", flush=True)
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"ok": True, "path": out_path, "url": f"/api/highlights/{highlight_id}/export/file"})
+
+
+@app.route("/api/highlights/<int:highlight_id>/export/file", methods=["GET"])
+def api_export_highlight_file(highlight_id):
+    out_path = _export_output_path(SOURCE_PATH, highlight_id)
+    if not out_path.exists():
+        return jsonify({"error": "not exported yet"}), 404
+    return send_file(out_path, conditional=True)
 
 
 def main():

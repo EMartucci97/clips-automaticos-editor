@@ -22,14 +22,17 @@ grouped (`words_per_group > 1`), the whole group takes a single color picked
 by majority vote across its words, so diarizer noise on one word can't flip
 the color mid-phrase.
 """
+import difflib
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import unicodedata
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .diarizer import OTHER_LABEL, ROBERTO_LABEL
 from .llm import call_local_llm
@@ -294,14 +297,135 @@ Tokens:
 """
 
 
-def _llm_cleanup_words(words: List[Dict]) -> List[Dict]:
-    """Re-reads the window's words with an LLM (full-context pass) to fix
-    likely Whisper mis-hears and convert spoken numbers to digits, without
-    paraphrasing words that are already correct. Falls back to the original
-    words unchanged on any failure (bad response, network error, coverage
-    mismatch) -- a transient LLM hiccup must never break clip generation."""
+# Max words sent to the LLM per cleanup/grouping call. The prompts require a
+# verbose per-word JSON object in the response, so a single call over a full
+# multi-minute clip (300+ words) can blow past the provider's output-token
+# cap and come back truncated/malformed -- silently degrading the whole clip
+# to raw, uncleaned text via the except-fallback below. Chunking keeps each
+# call small enough to always finish, and confines any one chunk's failure
+# to just that chunk instead of the entire clip.
+_LLM_CHUNK_SIZE = 80
+
+
+def _chunk_bounds(words: List[Dict], target_size: int) -> List[Tuple[int, int]]:
+    """Split `words` into chunks of ~target_size, each extended (up to +15
+    words) to the next sentence-ending punctuation so a chunk boundary lands
+    between sentences rather than mid-sentence -- in particular so it doesn't
+    split a multi-word number expression like "ocho y media" across two
+    separate LLM calls, which would leave each half uncombinable."""
+    n = len(words)
+    if n <= target_size:
+        return [(0, n)]
+    bounds = []
+    start = 0
+    while start < n:
+        end = min(start + target_size, n)
+        if end < n:
+            hard_cap = min(start + target_size + 15, n)
+            i = end
+            while i < hard_cap:
+                text = (words[i - 1].get("word") or "").rstrip()
+                if text.endswith((".", "!", "?", "…")):
+                    break
+                i += 1
+            end = i
+        bounds.append((start, end))
+        start = end
+    return bounds
+
+
+# Disk cache for the two LLM chunk passes above, keyed by chunk content (not
+# by clip/highlight id) -- so the live editor preview (/api/captions_range,
+# /api/caption_groups) and the real export (build_ass) hit the exact same
+# cache entries whenever they process the same words, instead of each paying
+# for its own LLM round-trip. Content-addressed rather than time/position-
+# addressed so an edited transcript word naturally busts just its own chunk.
+# Bump the "_v1" tags below if CLEANUP_PROMPT/GROUPING_PROMPT ever change in
+# a way that would make old cached answers wrong.
+_LLM_CACHE_DIR = Path(os.getenv("LOCAL_OUTPUT_DIR", "output")) / ".llm_cache"
+
+
+def _llm_cache_key(tag: str, payload) -> str:
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return f"{tag}_{digest}"
+
+
+def _llm_cache_get(key: str) -> Optional[dict]:
+    path = _LLM_CACHE_DIR / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _llm_cache_set(key: str, value: dict) -> None:
+    try:
+        _LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _LLM_CACHE_DIR / f"{key}.json"
+        tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        with open(tmp_path, "w") as f:
+            json.dump(value, f, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        print(f"[subtitles] LLM cache write failed ({e!r}); continuing uncached.")
+
+
+def _normalize_for_compare(text: str) -> str:
+    """Lowercase, strip accents and punctuation, for a fidelity comparison
+    that ignores cosmetic differences (case, tildes, signos)."""
+    text = unicodedata.normalize("NFKD", text.lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9\s]", "", text).strip()
+
+
+def _token_is_faithful(span: List[Dict], candidate_text: str) -> bool:
+    """Guard against the cleanup LLM hallucinating/reordering words, or
+    silently dropping words when it merges several original words into one
+    output token, instead of just fixing a mis-hear or converting a number.
+
+    Two distinct failure modes were found in production, both passing the
+    old index-coverage-only check:
+    1. A straight word swap ("bien" -> "bufandas") on a 1-word span.
+    2. A multi-word span (e.g. "bien ¿Vendías bufandas en Calle Florida
+       vendías", 7 words) collapsed into fewer words ("bufandas en calle
+       Florida ¿vendías?", 5 words) that still share enough characters with
+       the original for a char-level similarity ratio to stay high (~0.83)
+       even though two whole words -- "bien" and "¿Vendías" -- were quietly
+       swallowed. A char-ratio check alone cannot catch this.
+
+    CLEANUP_PROMPT only ever asks the LLM to merge multiple original words
+    into one token for spoken-number conversion (e.g. "ocho" + "y" +
+    "media" -> "8:30"). So any multi-word span that does NOT involve a
+    digit is already a contract violation on its face, regardless of text
+    similarity -- reject it outright rather than trying to score it."""
+    original_text = " ".join(w["word"] for w in span)
+    has_digit = any(c.isdigit() for c in original_text) or any(c.isdigit() for c in candidate_text)
+    if len(span) > 1 and not has_digit:
+        return False
+    if has_digit:
+        return True
+    original_norm = _normalize_for_compare(original_text)
+    candidate_norm = _normalize_for_compare(candidate_text)
+    if not original_norm or not candidate_norm:
+        return True
+    ratio = difflib.SequenceMatcher(None, original_norm, candidate_norm).ratio()
+    return ratio >= 0.5
+
+
+def _llm_cleanup_words_chunk(words: List[Dict]) -> List[Dict]:
+    """Single LLM cleanup call over one chunk. Falls back to the chunk's
+    original words unchanged on any failure (bad response, network error,
+    coverage mismatch, or a token that fails the fidelity check) -- a
+    transient LLM hiccup must never break clip generation."""
     if not words:
         return words
+    cache_key = _llm_cache_key("cleanup_v1", words)
+    cached = _llm_cache_get(cache_key)
+    if cached is not None:
+        return cached["merged"]
     try:
         numbered = "\n".join(f"{i}: {w['word']}" for i, w in enumerate(words))
         raw = call_local_llm(CLEANUP_PROMPT.format(numbered_words=numbered))
@@ -318,6 +442,11 @@ def _llm_cleanup_words(words: List[Dict]) -> List[Dict]:
         merged = []
         for t in tokens:
             span = words[t["orig_start"]:t["orig_end"]]
+            if not _token_is_faithful(span, t["text"]):
+                raise ValueError(
+                    f"unfaithful cleanup token: original={[w['word'] for w in span]!r} "
+                    f"-> {t['text']!r}"
+                )
             speakers = [w.get("speaker") for w in span]
             speaker = Counter(speakers).most_common(1)[0][0] if speakers else None
             merged.append({
@@ -328,19 +457,34 @@ def _llm_cleanup_words(words: List[Dict]) -> List[Dict]:
                 "word_start": span[0].get("word_start", span[0]["start"]),
                 "word_end": span[-1].get("word_end", span[-1]["end"]),
             })
+        _llm_cache_set(cache_key, {"merged": merged})
         return merged
     except Exception as e:
         print(f"[subtitles] LLM cleanup pass failed ({e!r}); using raw transcript words.")
         return words
 
 
-def _llm_group_words(words: List[Dict], words_per_group: int) -> List[tuple]:
-    """Groups (already-cleaned) words into caption boxes that read as
-    coherent phrases (2-4, up to 6 words) instead of a fixed word-count
-    stride. Falls back to the mechanical `_group_boundaries` heuristic on
-    any failure."""
+def _llm_cleanup_words(words: List[Dict]) -> List[Dict]:
+    """Re-reads the window's words with an LLM (full-context pass, chunked --
+    see `_LLM_CHUNK_SIZE`) to fix likely Whisper mis-hears and convert spoken
+    numbers to digits, without paraphrasing words that are already correct."""
+    if not words:
+        return words
+    merged: List[Dict] = []
+    for start, end in _chunk_bounds(words, _LLM_CHUNK_SIZE):
+        merged.extend(_llm_cleanup_words_chunk(words[start:end]))
+    return merged
+
+
+def _llm_group_words_chunk(words: List[Dict], words_per_group: int) -> List[tuple]:
+    """Single LLM grouping call over one chunk. Falls back to the mechanical
+    `_group_boundaries` heuristic (for just this chunk) on any failure."""
     if not words:
         return []
+    cache_key = _llm_cache_key("group_v1", {"words": words, "words_per_group": words_per_group})
+    cached = _llm_cache_get(cache_key)
+    if cached is not None:
+        return [tuple(g) for g in cached["groups"]]
     try:
         numbered = "\n".join(f"{i}: {w['word']}" for i, w in enumerate(words))
         raw = call_local_llm(GROUPING_PROMPT.format(numbered_tokens=numbered))
@@ -353,10 +497,24 @@ def _llm_group_words(words: List[Dict], words_per_group: int) -> List[tuple]:
             expect = g[1]
         if expect != len(words):
             raise ValueError(f"coverage incomplete: covered up to {expect}, need {len(words)}")
+        _llm_cache_set(cache_key, {"groups": groups})
         return groups
     except Exception as e:
         print(f"[subtitles] LLM grouping pass failed ({e!r}); using mechanical grouping.")
         return _group_boundaries(words, words_per_group)
+
+
+def _llm_group_words(words: List[Dict], words_per_group: int) -> List[tuple]:
+    """Groups (already-cleaned) words into caption boxes that read as
+    coherent phrases (2-4, up to 6 words) instead of a fixed word-count
+    stride (chunked -- see `_LLM_CHUNK_SIZE`)."""
+    if not words:
+        return []
+    groups: List[tuple] = []
+    for start, end in _chunk_bounds(words, _LLM_CHUNK_SIZE):
+        for g_start, g_end in _llm_group_words_chunk(words[start:end], words_per_group):
+            groups.append((g_start + start, g_end + start))
+    return groups
 
 
 _DANGLING_CONNECTORS = {

@@ -176,25 +176,54 @@ def remap_time(t: float, keep_segments: List[Tuple[float, float]]) -> Optional[f
     return None
 
 
+def _snap_forward(t: float, keep_segments: List[Tuple[float, float]]) -> Optional[float]:
+    """Nudge `t` to the start of surviving content if it falls inside a cut
+    gap, instead of leaving it undefined -- used for a word's *start* so a
+    cut landing mid-word trims the word rather than dropping it outright.
+    None only if `t` is past every keep segment (off the end of the clip)."""
+    for s, e in keep_segments:
+        if t <= e:
+            return max(t, s)
+    return None
+
+
+def _snap_backward(t: float, keep_segments: List[Tuple[float, float]]) -> Optional[float]:
+    """Mirror of `_snap_forward` for a word's *end*: nudge back to where
+    surviving content stops if `t` falls inside a cut gap. None only if `t`
+    is before every keep segment (nothing survived up to this point)."""
+    result = None
+    for s, e in keep_segments:
+        if t < s:
+            break
+        result = min(t, e)
+    return result
+
+
 def remap_words_across_cuts(
     words: List[Dict], keep_segments: List[Tuple[float, float]]
 ) -> List[Dict]:
-    """Shift each word's `start`/`end` onto the post-cut timeline, dropping
-    words that fall (even partially) inside a removed segment -- this is
-    also how cut filler words vanish from the burned captions, with no
-    separate text-side filtering step. `word_start`/`word_end` (used by the
-    editor's manual caption_time_overrides lookup) are left untouched."""
+    """Shift each word's `start`/`end` onto the post-cut timeline. A word
+    entirely inside a removed segment is dropped (this is how cut filler
+    words vanish from the burned captions, with no separate text-side
+    filtering step) -- but a word only *partially* clipped by a cut (a cut
+    boundary landing mid-word, e.g. a silence/filler cut whose edge doesn't
+    line up exactly with a word boundary) is trimmed to its surviving
+    portion and kept, instead of disappearing outright. Dropping those
+    outright used to make captions skip several words ahead of what's
+    actually playing, reading as scrambled/out of order.
+    `word_start`/`word_end` (used by the editor's manual
+    caption_time_overrides lookup) are left untouched."""
     if not keep_segments:
         return list(words)
     out = []
     for w in words:
-        new_start = remap_time(w["start"], keep_segments)
-        new_end = remap_time(w["end"], keep_segments)
+        new_start = _snap_forward(w["start"], keep_segments)
+        new_end = _snap_backward(w["end"], keep_segments)
         if new_start is None or new_end is None or new_end <= new_start:
             continue
         nw = dict(w)
-        nw["start"] = new_start
-        nw["end"] = new_end
+        nw["start"] = remap_time(new_start, keep_segments)
+        nw["end"] = remap_time(new_end, keep_segments)
         out.append(nw)
     return out
 
