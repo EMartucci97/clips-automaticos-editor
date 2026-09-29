@@ -1,4 +1,4 @@
-"""Local transcription via faster-whisper.
+"""Local transcription via mlx-whisper (GPU Apple) o faster-whisper (CPU/CUDA).
 
 Reads a local media file and returns the same shape the highlight generator
 expects: {duration, segments[start, end, text]}. Each segment also carries
@@ -8,6 +8,7 @@ downstream to burn word-by-word subtitles onto the rendered clips.
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -139,38 +140,110 @@ def _dedupe_word_timestamps(words: list, min_dur: float = 0.02) -> None:
             cur["end"] = cur["start"] + min_dur
 
 
-def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
-    """Run faster-whisper on a local file path, caching the result as .srt
-    (+ a sidecar .words.json with word-level timestamps for subtitles)."""
-    language = language or LOCAL_WHISPER_LANGUAGE
-    cache_path = _transcript_cache_path(media_path)
-    words_path = _words_cache_path(media_path)
-    if cache_path.exists():
-        source_mtime = os.path.getmtime(media_path)
-        cache_mtime = cache_path.stat().st_mtime
-        if cache_mtime >= source_mtime:
-            print(f"[transcribe/local] reusing cached transcript: {cache_path}", flush=True)
-            cached = _load_srt_cache(cache_path)
-            # Treat empty cache as invalid (likely from a failed/partial run) — delete and re-transcribe
-            if not cached["segments"] or cached["duration"] <= 0.0:
-                print(f"[transcribe/local] cache is empty/invalid, deleting: {cache_path}", flush=True)
-                cache_path.unlink(missing_ok=True)
-                words_path.unlink(missing_ok=True)
-            else:
-                if words_path.exists():
-                    try:
-                        words_by_segment = json.loads(words_path.read_text(encoding="utf-8"))
-                        for seg, words in zip(cached["segments"], words_by_segment):
-                            seg["words"] = words
-                    except (json.JSONDecodeError, OSError):
-                        pass
-                print(
-                    f"[transcribe/local] {len(cached['segments'])} cached segments, "
-                    f"{cached['duration']:.0f}s of audio",
-                    flush=True,
-                )
-                return cached
+# Mismo modelo (whisper medium) corriendo en la GPU de Apple vía MLX: ~10x más
+# rápido que faster-whisper int8 en CPU (3 min de podcast: 68s vs 775s en un
+# M4) con timestamps de palabra casi idénticos (mediana 0.02s de diferencia).
+# large-v3-turbo se probó y corre los timestamps hasta 0.5s: descartado.
+# LOCAL_WHISPER_ENGINE=faster-whisper vuelve al motor anterior.
+_MLX_REPOS = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+}
 
+
+# Transcripciones MLX en curso: el reaper de editor_server no suelta el
+# modelo mientras sea > 0.
+_mlx_lock = threading.Lock()
+_mlx_active = 0
+
+
+def _use_mlx() -> bool:
+    engine = os.getenv("LOCAL_WHISPER_ENGINE", "auto").strip().lower()
+    if engine == "faster-whisper" or LOCAL_WHISPER_DEVICE == "cuda":
+        return False
+    if LOCAL_WHISPER_MODEL not in _MLX_REPOS:
+        return False
+    import platform
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx_whisper  # noqa: F401
+    except ImportError:
+        if engine == "mlx":
+            raise RuntimeError("LOCAL_WHISPER_ENGINE=mlx pero mlx-whisper no está instalado")
+        return False
+    return True
+
+
+def _transcribe_mlx(media_path: str, language: Optional[str]):
+    import mlx_whisper
+    repo = _MLX_REPOS[LOCAL_WHISPER_MODEL]
+    print(f"[transcribe/local] mlx-whisper model={repo} (GPU)", flush=True)
+    # Sin beam search (mlx-whisper no lo implementa): greedy dio el mismo
+    # texto que beam_size=5 salvo palabras sueltas dudosas. Sin VAD, igual
+    # que el default LOCAL_WHISPER_VAD_FILTER=false de faster-whisper.
+    global _mlx_active
+    with _mlx_lock:
+        _mlx_active += 1
+    try:
+        result = mlx_whisper.transcribe(
+            media_path,
+            path_or_hf_repo=repo,
+            language=language,
+            condition_on_previous_text=False,
+            word_timestamps=True,
+            initial_prompt=LOCAL_WHISPER_INITIAL_PROMPT or None,
+        )
+    finally:
+        with _mlx_lock:
+            _mlx_active -= 1
+    segments, words_by_segment = [], []
+    for s in result.get("segments", []):
+        segments.append({"start": float(s["start"]), "end": float(s["end"]), "text": (s.get("text") or "").strip()})
+        words_by_segment.append([
+            {"start": float(w["start"]), "end": float(w["end"]), "word": w["word"].strip()}
+            for w in s.get("words", [])
+        ])
+    # Duración real del archivo (el último segmento termina antes si el
+    # video cierra en silencio); faster-whisper la daba en info.duration.
+    import subprocess
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", media_path],
+        capture_output=True, text=True,
+    )
+    try:
+        duration = float(probe.stdout.strip())
+    except ValueError:
+        duration = 0.0
+    return segments, words_by_segment, duration
+
+
+def unload_mlx_model() -> bool:
+    """Suelta el modelo que mlx-whisper deja cacheado a nivel de clase.
+    No hace nada mientras haya una transcripción en curso."""
+    try:
+        from mlx_whisper.transcribe import ModelHolder
+    except ImportError:
+        return False
+    with _mlx_lock:
+        if _mlx_active:
+            return False
+    if ModelHolder.model is None:
+        return False
+    ModelHolder.model = None
+    ModelHolder.model_path = None
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass
+    return True
+
+
+def _transcribe_faster_whisper(media_path: str, language: Optional[str]):
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except ImportError as e:
@@ -217,6 +290,45 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
             for w in (s.words or [])
         ]
         words_by_segment.append(words)
+    return segments, words_by_segment, float(getattr(info, "duration", 0.0))
+
+
+def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
+    """Run faster-whisper on a local file path, caching the result as .srt
+    (+ a sidecar .words.json with word-level timestamps for subtitles)."""
+    language = language or LOCAL_WHISPER_LANGUAGE
+    cache_path = _transcript_cache_path(media_path)
+    words_path = _words_cache_path(media_path)
+    if cache_path.exists():
+        source_mtime = os.path.getmtime(media_path)
+        cache_mtime = cache_path.stat().st_mtime
+        if cache_mtime >= source_mtime:
+            print(f"[transcribe/local] reusing cached transcript: {cache_path}", flush=True)
+            cached = _load_srt_cache(cache_path)
+            # Treat empty cache as invalid (likely from a failed/partial run) — delete and re-transcribe
+            if not cached["segments"] or cached["duration"] <= 0.0:
+                print(f"[transcribe/local] cache is empty/invalid, deleting: {cache_path}", flush=True)
+                cache_path.unlink(missing_ok=True)
+                words_path.unlink(missing_ok=True)
+            else:
+                if words_path.exists():
+                    try:
+                        words_by_segment = json.loads(words_path.read_text(encoding="utf-8"))
+                        for seg, words in zip(cached["segments"], words_by_segment):
+                            seg["words"] = words
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                print(
+                    f"[transcribe/local] {len(cached['segments'])} cached segments, "
+                    f"{cached['duration']:.0f}s of audio",
+                    flush=True,
+                )
+                return cached
+
+    if _use_mlx():
+        segments, words_by_segment, duration = _transcribe_mlx(media_path, language)
+    else:
+        segments, words_by_segment, duration = _transcribe_faster_whisper(media_path, language)
 
     # Dedupe across the whole transcript at once (not per-segment) so a
     # collision spanning a segment boundary -- like a zero-duration word
@@ -224,7 +336,7 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
     # still gets caught; see _dedupe_word_timestamps's docstring.
     _dedupe_word_timestamps([w for words in words_by_segment for w in words])
 
-    duration = float(getattr(info, "duration", 0.0)) or (segments[-1]["end"] if segments else 0.0)
+    duration = duration or (segments[-1]["end"] if segments else 0.0)
     print(f"[transcribe/local] {len(segments)} segments, {duration:.0f}s of audio", flush=True)
     transcript = {"duration": duration, "segments": segments}
     cache_path = _write_srt_cache(media_path, transcript)

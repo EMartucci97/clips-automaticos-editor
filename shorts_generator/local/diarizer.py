@@ -14,7 +14,10 @@ just runs the pipeline without speaker labels instead of breaking it.
 import glob
 import json
 import os
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")  # ops de pyannote sin kernel MPS van a CPU
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -42,9 +45,63 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 def _get_pipeline():
     global _pipeline
     if _pipeline is None:
+        import torch
         from pyannote.audio import Pipeline
         _pipeline = Pipeline.from_pretrained(DIARIZATION_PIPELINE_NAME, token=HF_TOKEN or None)
+        # GPU de Apple (MPS): ~5x más rápido que CPU con turnos idénticos
+        # (medido sobre 3 min del podcast). _run_pipeline cae a CPU si falla.
+        if torch.backends.mps.is_available():
+            _pipeline.to(torch.device("mps"))
     return _pipeline
+
+
+_pipeline_last_used = 0.0
+_pipeline_lock = threading.Lock()
+
+
+def unload_if_idle(max_idle_s: float) -> bool:
+    """Suelta el pipeline de pyannote (~1GB entre RAM y memoria MPS) si no se
+    usó en max_idle_s. Se recarga solo en la próxima diarización (~5s)."""
+    global _pipeline
+    if _pipeline is None or not _pipeline_lock.acquire(blocking=False):
+        return False
+    try:
+        if _pipeline is None or time.time() - _pipeline_last_used < max_idle_s:
+            return False
+        _pipeline = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+        return True
+    finally:
+        _pipeline_lock.release()
+
+
+def _run_pipeline(audio_path: str, **kwargs):
+    with _pipeline_lock:
+        global _pipeline_last_used
+        try:
+            return _run_pipeline_unlocked(audio_path, **kwargs)
+        finally:
+            _pipeline_last_used = time.time()
+
+
+def _run_pipeline_unlocked(audio_path: str, **kwargs):
+    pipeline = _get_pipeline()
+    try:
+        return pipeline(audio_path, **kwargs)
+    except RuntimeError as e:
+        if "mps" not in str(e).lower():
+            raise
+        import torch
+        print(f"[diarize/local] MPS falló ({e}); reintentando en CPU", flush=True)
+        pipeline.to(torch.device("cpu"))
+        return pipeline(audio_path, **kwargs)
 
 
 def _roberto_reference_path() -> Path:
@@ -69,10 +126,9 @@ def _get_roberto_reference() -> np.ndarray:
         return _roberto_ref_embedding
 
     print(f"[diarize/local] enrolling Roberto's voice from {len(ref_clips)} reference clip(s)", flush=True)
-    pipeline = _get_pipeline()
     embeddings = []
     for clip in ref_clips:
-        out = pipeline(clip, num_speakers=1)
+        out = _run_pipeline(clip, num_speakers=1)
         embeddings.append(out.speaker_embeddings[0])
     _roberto_ref_embedding = np.mean(embeddings, axis=0)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,11 +173,10 @@ def diarize_local(media_path: str) -> List[Dict]:
         return json.loads(cache_path.read_text(encoding="utf-8"))
 
     roberto_ref = _get_roberto_reference()
-    pipeline = _get_pipeline()
     audio_wav = _extract_audio_wav(media_path)
 
     print(f"[diarize/local] diarizing {media_path}", flush=True)
-    out = pipeline(audio_wav)
+    out = _run_pipeline(audio_wav)
     labels = out.speaker_diarization.labels()
     embeddings = out.speaker_embeddings
 

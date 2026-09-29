@@ -1,8 +1,11 @@
 """Local LLM backend — OpenAI, Gemini, or Anthropic, selected by LLM_PROVIDER."""
+import time
+
 from ..config import (
     ANTHROPIC_MODEL,
     ANTHROPIC_WORKSPACE_ID,
     GEMINI_MODEL,
+    LLM_FALLBACK_PROVIDER,
     LLM_PROVIDER,
     OPENAI_MODEL,
     require_anthropic_key,
@@ -74,9 +77,7 @@ def call_anthropic_llm(prompt: str) -> str:
     return "".join(block.text for block in response.content if block.type == "text")
 
 
-def call_local_llm(prompt: str) -> str:
-    """Dispatch to the configured local LLM provider."""
-    provider = (LLM_PROVIDER or "openai").strip().lower()
+def _call_provider(provider: str, prompt: str) -> str:
     if provider == "openai":
         return call_openai_llm(prompt)
     if provider == "gemini":
@@ -84,5 +85,44 @@ def call_local_llm(prompt: str) -> str:
     if provider == "anthropic":
         return call_anthropic_llm(prompt)
     raise RuntimeError(
-        f"Unknown LLM_PROVIDER={provider!r}. Use 'openai', 'gemini', or 'anthropic'."
+        f"Unknown LLM provider {provider!r}. Use 'openai', 'gemini', or 'anthropic'."
     )
+
+
+_TRANSIENT_MARKERS = ("503", "500", "unavailable", "overloaded", "high demand", "timeout", "timed out")
+_QUOTA_MARKERS = ("429", "resource_exhausted", "quota")
+_RETRY_DELAYS = (3, 10, 30)
+# Cuota agotada (tier gratis): reintentar no sirve, se salta directo al backup y
+# se evita volver a pegarle al proveedor durante este rato.
+_QUOTA_COOLDOWN_S = 120
+_quota_blocked_until: dict[str, float] = {}
+
+
+def call_local_llm(prompt: str) -> str:
+    """Dispatch to LLM_PROVIDER; retry transient errors, then use LLM_FALLBACK_PROVIDER.
+    Quota errors (429) skip retries and go straight to the fallback."""
+    provider = (LLM_PROVIDER or "openai").strip().lower()
+    last_err: Exception | None = None
+    has_fallback = bool(LLM_FALLBACK_PROVIDER and LLM_FALLBACK_PROVIDER != provider)
+    if has_fallback and time.time() < _quota_blocked_until.get(provider, 0):
+        return _call_provider(LLM_FALLBACK_PROVIDER, prompt)
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            return _call_provider(provider, prompt)
+        except Exception as e:  # noqa: BLE001 — cualquier fallo del proveedor cae al backup
+            last_err = e
+            msg = str(e).lower()
+            if has_fallback and any(m in msg for m in _QUOTA_MARKERS):
+                _quota_blocked_until[provider] = time.time() + _QUOTA_COOLDOWN_S
+                break
+            transient = any(m in msg for m in _TRANSIENT_MARKERS) or any(m in msg for m in _QUOTA_MARKERS)
+            if not transient or attempt == len(_RETRY_DELAYS):
+                break
+            print(f"[llm] {provider} falló ({str(e)[:80]}), reintento en {_RETRY_DELAYS[attempt]}s", flush=True)
+            time.sleep(_RETRY_DELAYS[attempt])
+
+    fallback = LLM_FALLBACK_PROVIDER
+    if fallback and fallback != provider:
+        print(f"[llm] {provider} no disponible ({str(last_err)[:120]}), uso backup: {fallback}", flush=True)
+        return _call_provider(fallback, prompt)
+    raise last_err  # type: ignore[misc]

@@ -6,20 +6,27 @@ Usage:
     python3 editor_server.py <source_video_path> [--port 8502] [--num-clips 20]
 """
 import argparse
+import hashlib
+import io
 import json
 import os
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")  # ops de pyannote sin kernel MPS van a CPU
 import re
 import subprocess
+import tempfile
 import threading
+import time
+import uuid
 import wave
 from pathlib import Path
 
 import numpy as np
-from flask import Flask, jsonify, request, send_file, abort
+from flask import Flask, jsonify, request, send_file, send_from_directory, abort
 
 from shorts_generator.config import LOCAL_OUTPUT_DIR
 from shorts_generator.highlights import _parse_json_loose, get_highlights
 from shorts_generator.local import clipper, editing
+from shorts_generator.local.encoding import FINAL_VIDEO_ARGS, intermediate_encodes
 from shorts_generator.local.diarizer import (
     OTHER_LABEL,
     ROBERTO_LABEL,
@@ -28,9 +35,11 @@ from shorts_generator.local.diarizer import (
 )
 from shorts_generator.local.llm import call_local_llm
 from shorts_generator.local.subtitles import (
+    FONTS_DIR,
     CAPTION_COLORS,
     CAPTION_POSITIONS,
     CAPTION_SIZES,
+    CAPTION_SIZE_RANGE,
     CAPTION_STYLES,
     DEFAULT_CAPTION_COLOR,
     DEFAULT_CAPTION_POSITION,
@@ -38,9 +47,17 @@ from shorts_generator.local.subtitles import (
     DEFAULT_FONT_KEY,
     DEFAULT_WORDS_PER_GROUP,
     FONT_CHOICES,
-    _llm_cleanup_words,
-    _llm_group_words,
+    _group_boundaries,
+    _layout_metrics,
+    _pil_font,
+    _split_groups_to_fit,
+    apply_group_keys,
+    arrange_caption_group_keys,
     burn_subtitles,
+    correct_clip_words,
+    resolve_caption_color,
+    resolve_caption_pos,
+    resolve_caption_size,
     words_for_window,
 )
 from shorts_generator.local.transcriber import transcribe_local
@@ -55,8 +72,23 @@ DEFAULT_CROP_MODE = "single"
 
 MUSIC_DIR = Path(__file__).resolve().parent / "assets" / "music"
 DEFAULT_MUSIC_VOLUME = 0.18
-CTA_OUTRO_DURATION_SECONDS = 6.5
+CTA_OUTRO_DURATION_SECONDS = 4.5
 CTA_OUTRO_BLUR_SIGMA = 22.0
+
+# Text templates ("Plantillas") overlaid on the first seconds of a vertical
+# clip. The rendering lives in clipper.TEXT template helpers; here we only
+# persist/validate what the editor's panel lets the user choose.
+TEXT_TEMPLATE_IDS = clipper.TEMPLATE_IDS
+DEFAULT_TEMPLATE_DURATION = 4.0
+TEMPLATE_DURATION_RANGE = (1.0, 15.0)
+
+# Free-form overlay layers ("Capas"): PNGs the user drops onto the frame and
+# then moves/resizes on the preview, same coordinate contract as the template
+# card (x/y = top-left corner, w = width, all fractions of the output frame).
+OVERLAY_DIR = Path(__file__).resolve().parent / "output" / "overlay_assets"
+OVERLAY_MAX_BYTES = 12 * 1024 * 1024
+OVERLAY_EXTENSIONS = {".png", ".webp", ".gif", ".jpg", ".jpeg"}
+MAX_OVERLAYS_PER_CLIP = 12
 
 app = Flask(__name__)
 
@@ -65,7 +97,6 @@ NUM_CLIPS = 20
 
 _TRANSCRIPT_CACHE = None
 _DIARIZED_TRANSCRIPT_CACHE = None
-_CLEANED_WORDS_CACHE: dict = {}
 
 SEGMENT_ANALYSIS_PROMPT = """Sos un editor de video que analiza un tramo de transcripción de una entrevista/podcast en español.
 
@@ -174,7 +205,12 @@ def _preview_video_path(source_path: str) -> Path:
     keeps reading directly.
     """
     stem = Path(source_path).stem
-    preview_path = Path(LOCAL_OUTPUT_DIR) / f"{stem}.preview.mp4"
+    # Proxy liviano (lado corto 720p, 2.5 Mbps): el <video> del editor decodifica
+    # y bufferea ~4x menos que con el 1080p a 8 Mbps de antes. El export sigue
+    # leyendo SOURCE_PATH, y el front toma el tamaño real del frame de
+    # /api/source_info (no del videoWidth del proxy). El sufijo nuevo hace que
+    # los .preview.mp4 viejos queden huérfanos en vez de reusarse.
+    preview_path = Path(LOCAL_OUTPUT_DIR) / f"{stem}.preview720.mp4"
     if preview_path.exists():
         return preview_path
     with _PREVIEW_LOCK:
@@ -185,9 +221,10 @@ def _preview_video_path(source_path: str) -> Path:
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-i", source_path,
-            "-c:v", "h264_videotoolbox", "-b:v", "8M",
+            "-vf", "scale=w='if(gt(iw,ih),-2,min(720,iw))':h='if(gt(iw,ih),min(720,ih),-2)'",
+            "-c:v", "h264_videotoolbox", "-b:v", "2500k",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             str(tmp_path),
         ]
@@ -196,6 +233,19 @@ def _preview_video_path(source_path: str) -> Path:
         os.replace(tmp_path, preview_path)
         print(f"[editor] preview ready: {preview_path}", flush=True)
         return preview_path
+
+
+_SOURCE_INFO = None
+
+
+@app.route("/api/source_info")
+def api_source_info():
+    """Tamaño real del frame de la fuente (el proxy de /video es más chico)."""
+    global _SOURCE_INFO
+    if _SOURCE_INFO is None:
+        w, h, fps = clipper._ffprobe_video_info(SOURCE_PATH)
+        _SOURCE_INFO = {"width": w, "height": h, "fps": fps}
+    return jsonify(_SOURCE_INFO)
 
 
 @app.route("/video")
@@ -244,9 +294,55 @@ def _build_waveform(source_path: str, samples_per_sec: float = 20.0) -> list:
             peaks.append(peaks[-1] if peaks else 0.0)
 
     os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
-    with open(cache_path, "w") as f:
-        json.dump(peaks, f)
+    # Atómico: el precalentado y un GET /api/waveform pueden calcularla a la
+    # vez, y un lector no debe ver el JSON a medio escribir.
+    tmp_path = cache_path.with_name(f"{cache_path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+    with open(tmp_path, "w") as f:
+        json.dump(peaks, f)  # compacto: miles de puntos, sin indent
+    os.replace(tmp_path, cache_path)
     return peaks
+
+
+# Precalentado al arrancar: antes el primer GET de /video, /api/highlights y
+# /api/waveform hacía TODO el trabajo pesado (transcode del proxy,
+# transcripción + diarización + LLM) dentro del request, con la página
+# colgada. Ahora arranca apenas levanta el server, en dos hilos (el proxy va
+# por VideoToolbox y no compite con whisper/pyannote en CPU). Los endpoints
+# siguen llamando a las mismas funciones: si llegan antes de que termine,
+# esperan el lock y reusan el resultado, sin duplicar trabajo.
+_WARMUP_STATE = {"preview": "pendiente", "analysis": "pendiente", "error": None}
+
+
+def _warmup_preview() -> None:
+    try:
+        _WARMUP_STATE["preview"] = "generando proxy de video…"
+        _preview_video_path(SOURCE_PATH)
+        _WARMUP_STATE["preview"] = "listo"
+    except Exception as exc:
+        _WARMUP_STATE["preview"] = "error"
+        _WARMUP_STATE["error"] = f"proxy: {exc!r}"
+        print(f"[editor] warmup preview failed: {exc!r}", flush=True)
+
+
+def _warmup_analysis() -> None:
+    try:
+        if not _highlights_cache_path(SOURCE_PATH).exists():
+            _WARMUP_STATE["analysis"] = "transcribiendo, identificando voces y buscando highlights…"
+        _load_or_build_highlights(SOURCE_PATH)
+        _WARMUP_STATE["analysis"] = "armando forma de onda…"
+        _build_waveform(SOURCE_PATH)
+        _WARMUP_STATE["analysis"] = "cargando transcripción…"
+        _get_diarized_transcript(SOURCE_PATH)
+        _WARMUP_STATE["analysis"] = "listo"
+    except Exception as exc:
+        _WARMUP_STATE["analysis"] = "error"
+        _WARMUP_STATE["error"] = f"análisis: {exc!r}"
+        print(f"[editor] warmup analysis failed: {exc!r}", flush=True)
+
+
+@app.route("/api/warmup", methods=["GET"])
+def api_warmup():
+    return jsonify(_WARMUP_STATE)
 
 
 @app.route("/api/waveform", methods=["GET"])
@@ -333,6 +429,7 @@ def _apply_transcript_overrides(transcript: dict, overrides: dict) -> None:
             consumed.add(key)
             if "text" in entry:
                 w["word"] = entry["text"]
+                w["overridden"] = True
             if "speaker" in entry:
                 w["speaker_override"] = entry["speaker"]
 
@@ -418,6 +515,57 @@ def _sanitize_subtopic_clips(raw_subtopics: object, start: float, end: float) ->
     return merged
 
 
+def _clamp01(value, default: float = 0.0) -> float:
+    try:
+        return min(max(float(value), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sanitize_overlays(raw: object) -> list:
+    """Normalises the editor's overlay layer list. Geometry is stored as
+    fractions of the output frame (x/y = top-left corner, w = width; the height
+    follows the PNG's own aspect), which is the same contract clipper's
+    burn_overlay_items consumes -- so what the panel drags is literally what
+    gets composited.
+
+    `file` is forced back to a bare name inside OVERLAY_DIR: these values come
+    from a PATCH body and end up in a filesystem path at export time."""
+    if not isinstance(raw, list):
+        return []
+    items = []
+    for entry in raw[:MAX_OVERLAYS_PER_CLIP]:
+        if not isinstance(entry, dict):
+            continue
+        name = os.path.basename(str(entry.get("file", "")))
+        if not name or not (OVERLAY_DIR / name).is_file():
+            continue
+        start = max(float(entry.get("start", 0.0) or 0.0), 0.0)
+        end = entry.get("end")
+        try:
+            end = None if end in (None, "") else max(float(end), start + 0.1)
+        except (TypeError, ValueError):
+            end = None
+        items.append({
+            "id": str(entry.get("id") or uuid.uuid4().hex[:8]),
+            "file": name,
+            "label": str(entry.get("label") or name)[:80],
+            # x/y are deliberately allowed a little outside 0-1 so a layer can
+            # be bled off the edge of the frame on purpose.
+            "x": min(max(float(entry.get("x", 0.1) or 0.0), -1.0), 2.0),
+            "y": min(max(float(entry.get("y", 0.1) or 0.0), -1.0), 2.0),
+            "w": min(max(float(entry.get("w", 0.3) or 0.05), 0.01), 3.0),
+            "start": start,
+            "end": end,
+            "opacity": _clamp01(entry.get("opacity", 1.0), 1.0),
+            "anim_in": (str(entry.get("anim_in") or "none").lower()
+                        if str(entry.get("anim_in") or "none").lower() in clipper.OVERLAY_ANIMS
+                        else "none"),
+            "anim_dur": min(max(float(entry.get("anim_dur") or clipper.OVERLAY_ANIM_DEFAULT_SECONDS), 0.1), 2.0),
+        })
+    return items
+
+
 def _transcript_duration(transcript: dict) -> float:
     duration = transcript.get("duration")
     if duration:
@@ -491,16 +639,13 @@ def api_transcript_range():
 
 
 def _get_cleaned_words(source_words: list, start: float, end: float) -> list:
-    """Cleaned version (Whisper mis-hear fixes, spoken numbers -> digits) of
-    a words_for_window window, via the same _llm_cleanup_words pass
-    build_ass runs before burning the real export -- cached in-memory by
-    (start, end) so /api/captions_range and /api/caption_groups, which are
-    always requested for the same window back-to-back, share one LLM call
-    instead of duplicating it."""
-    key = (start, end)
-    if key not in _CLEANED_WORDS_CACHE:
-        _CLEANED_WORDS_CACHE[key] = _llm_cleanup_words(source_words)
-    return _CLEANED_WORDS_CACHE[key]
+    """Words for a words_for_window window, matching build_ass/burn_subtitles'
+    use_llm=False default (benchmark showed the LLM cleanup pass -- Whisper
+    mis-hear fixes, spoken numbers -> digits -- isn't worth its cost: the
+    mechanical path scored the same without it, see benchmark/work/report.md).
+    No LLM call, no cache needed -- kept as a function so callers/signature
+    don't have to change if a cleanup pass is ever reintroduced."""
+    return source_words
 
 
 @app.route("/api/captions_range", methods=["GET"])
@@ -517,32 +662,85 @@ def api_captions_range():
     return jsonify({"words": words, "cleaned_words": cleaned_words})
 
 
+def _valid_group_keys(h, words_per_group):
+    """Keys saved by "Acomodar subtitulos", only while they still describe the
+    grouping the user asked for: they were generated for one specific
+    `caption_words`, so changing it falls back to the automatic grouping."""
+    keys = h.get("caption_group_keys")
+    if keys and h.get("caption_group_words") == words_per_group:
+        return keys
+    return None
+
+
+def _stored_group_keys(hid, words_per_group):
+    try:
+        hid = int(hid)
+    except (TypeError, ValueError):
+        return None
+    cache_path = _highlights_cache_path(SOURCE_PATH)
+    with _highlights_lock:
+        if not cache_path.exists():
+            return None
+        with open(cache_path) as f:
+            highlights = json.load(f)
+    h = next((x for x in highlights if x.get("id") == hid), None)
+    return _valid_group_keys(h, words_per_group) if h else None
+
+
 @app.route("/api/caption_groups", methods=["GET"])
 def api_caption_groups():
     """Real caption-box boundaries for the editor's live preview, computed
-    the same way the final render decides them (subtitles.build_ass: first
-    _llm_cleanup_words, then _llm_group_words on the cleaned tokens), not the
-    JS mechanical fallback groupCaptionBoundaries() -- that fallback only
+    the same way the final render decides them (subtitles.build_ass with its
+    use_llm=False default: _group_boundaries on the raw tokens, then
+    _split_groups_to_fit so no group is wider than one line). _group_boundaries
+    is NOT the JS mechanical fallback groupCaptionBoundaries() -- that one only
     breaks on punctuation, and this project's transcripts carry none, so it
     always degraded to a fixed-size hard cap and never actually showed
-    phrase-level grouping. Indices are into the RAW word list
+    phrase-level grouping. _group_boundaries is the Python mechanical grouper
+    benchmarked in benchmark/work/report.md, which tied Opus 5 on every
+    quality metric at $0/video, so there's no LLM call here any more.
+    Indices are into the RAW word list
     /api/captions_range returns for this start/end (not the cleaned one),
     so the editor's caption-block drag/timing system -- which only knows how
     to address raw, one-object-per-original-word entries -- can keep using
-    these boundaries to slice clipEditor.captionWords unchanged."""
+    these boundaries to slice clipEditor.captionWords unchanged.
+
+    The one-line re-split needs the same font/size/position/style/resolution
+    build_ass would use, so the caller (loadCaptionGroups in the editor)
+    passes the highlight's caption look plus the frame it's previewing --
+    without these the preview can't know how wide a line actually is and
+    would show groups build_ass would have split, exactly the bug this
+    endpoint exists to avoid."""
     try:
         start = float(request.args.get("start", 0))
         end = float(request.args.get("end", 0))
         words_per_group = int(request.args.get("words", 1))
+        frame_w = max(int(request.args.get("frame_w", 1080)), 16)
+        frame_h = max(int(request.args.get("frame_h", 1920)), 16)
     except (TypeError, ValueError):
-        return jsonify({"error": "invalid start/end/words"}), 400
+        return jsonify({"error": "invalid start/end/words/frame_w/frame_h"}), 400
 
     transcript = _get_diarized_transcript(SOURCE_PATH)
     words = words_for_window(transcript.get("segments", []), start, end)
     if words_per_group <= 1 or not words:
         groups = [[i, i + 1] for i in range(len(words))]
     else:
-        groups = [list(g) for g in _llm_group_words(words, words_per_group)]
+        stored_keys = _stored_group_keys(request.args.get("hid"), words_per_group)
+        if stored_keys:
+            groups = list(apply_group_keys(words, stored_keys))
+        else:
+            groups = list(_group_boundaries(words, words_per_group))
+        font_key = request.args.get("font", DEFAULT_FONT_KEY)
+        font_name = FONT_CHOICES.get(font_key, FONT_CHOICES[DEFAULT_FONT_KEY])
+        size = resolve_caption_size(request.args.get("size"))
+        position = request.args.get("position", DEFAULT_CAPTION_POSITION)
+        style = request.args.get("style", DEFAULT_CAPTION_STYLE)
+        pos = resolve_caption_pos(request.args.get("pos_x"), request.args.get("pos_y"))
+        layout = _layout_metrics(size, position, style, frame_h, pos=pos)
+        pil_font = _pil_font(font_name, layout["size"])
+        max_text_width = frame_w - 2 * layout["margin_lr"] - 2 * layout["pad_x"]
+        groups = _split_groups_to_fit(groups, words, pil_font, max_text_width, True)
+        groups = [list(g) for g in groups]
     return jsonify({"groups": groups})
 
 
@@ -661,12 +859,46 @@ def _overlapping_windows(duration: float, window_seconds: float, stride_seconds:
     return windows
 
 
+# Job en background (antes: request síncrono de varios minutos, con las
+# ventanas una tras otra). POST lo arranca, GET devuelve el progreso; el
+# frontend recarga /api/highlights al terminar.
+_FULL_ANALYSIS = {"running": False, "done": 0, "total": 0, "error": None, "count": None}
+_FULL_ANALYSIS_LOCK = threading.Lock()
+FULL_VIDEO_PARALLEL_WINDOWS = 3  # Gemini free tolera esto sin 429; el retry/fallback de llm.py sigue igual
+
+
+@app.route("/api/analyze_full_video", methods=["GET"])
+def api_analyze_full_video_status():
+    return jsonify(_FULL_ANALYSIS)
+
+
 @app.route("/api/analyze_full_video", methods=["POST"])
 def api_analyze_full_video():
     transcript = _get_transcript(SOURCE_PATH)
     duration = _transcript_duration(transcript)
     if duration <= 0:
         return jsonify({"error": "no transcript available"}), 400
+    with _FULL_ANALYSIS_LOCK:
+        if not _FULL_ANALYSIS["running"]:
+            _FULL_ANALYSIS.update(running=True, done=0, total=0, error=None, count=None)
+            threading.Thread(
+                target=_run_full_analysis_job, args=(transcript, duration),
+                daemon=True, name="full-analysis",
+            ).start()
+    return jsonify(_FULL_ANALYSIS), 202
+
+
+def _run_full_analysis_job(transcript: dict, duration: float) -> None:
+    try:
+        _FULL_ANALYSIS["count"] = _full_analysis(transcript, duration)
+    except Exception as exc:
+        print(f"[editor] analyze_full_video failed: {exc!r}", flush=True)
+        _FULL_ANALYSIS["error"] = str(exc)
+    finally:
+        _FULL_ANALYSIS["running"] = False
+
+
+def _full_analysis(transcript: dict, duration: float) -> int:
 
     # One LLM call per overlapping window instead of a single call over the
     # whole transcript, purely so each call sees a manageable amount of
@@ -676,21 +908,34 @@ def api_analyze_full_video():
     # duplicate detections from the overlap get merged in
     # _sanitize_clip_candidates. Clips are intentionally allowed to overlap
     # each other — see FULL_VIDEO_TOPICS_PROMPT.
-    raw_clips = []
     windows = _overlapping_windows(duration, FULL_VIDEO_WINDOW_SECONDS, FULL_VIDEO_STRIDE_SECONDS)
-    for win_start, win_end in windows:
-        timed_text = _transcript_lines_for_range(transcript, win_start, win_end)
-        if timed_text.strip():
+    _FULL_ANALYSIS["total"] = len(windows)
+
+    def analyze_window(win):
+        win_start, win_end = win
+        try:
+            timed_text = _transcript_lines_for_range(transcript, win_start, win_end)
+            if not timed_text.strip():
+                return []
             prompt = FULL_VIDEO_TOPICS_PROMPT.format(text=timed_text, start=win_start, end=win_end)
             try:
                 raw = call_local_llm(prompt)
                 parsed = _parse_json_loose(raw)
-                raw_clips.extend(parsed.get("clips") or [])
+                return parsed.get("clips") or []
             except Exception as e:
                 print(f"[editor] analyze_full_video window [{win_start:.0f},{win_end:.0f}] failed: {e}", flush=True)
+                return []
+        finally:
+            _FULL_ANALYSIS["done"] += 1
+
+    # map() conserva el orden de las ventanas, así el merge de duplicados
+    # de _sanitize_clip_candidates ve lo mismo que con el loop secuencial.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=FULL_VIDEO_PARALLEL_WINDOWS) as pool:
+        raw_clips = [c for clips in pool.map(analyze_window, windows) for c in clips]
 
     if not raw_clips:
-        return jsonify({"error": "no clips detected"}), 500
+        raise RuntimeError("no clips detected")
 
     clips = _sanitize_clip_candidates(raw_clips, duration)
 
@@ -734,7 +979,7 @@ def api_analyze_full_video():
         _atomic_write_json(cache_path, highlights)
         print(f"[editor] wrote {len(clips)} full-video clip(s) -> {cache_path}", flush=True)
 
-    return jsonify(highlights)
+    return len(clips)
 
 
 SILENCE_MIN_GAP_SECONDS = 0.3
@@ -925,11 +1170,14 @@ PRESET_FIELDS = (
     "caption_color",
     "caption_size",
     "caption_position",
+    "caption_pos_x",
+    "caption_pos_y",
     "caption_words",
     "captions_enabled",
     "speed",
     "music_track",
     "music_volume",
+    "cta_id",
 )
 _presets_lock = threading.Lock()
 
@@ -1014,6 +1262,8 @@ def api_patch_highlight(highlight_id):
                 match.pop("color", None)
         if "captions_enabled" in body:
             match["captions_enabled"] = bool(body["captions_enabled"])
+        if "audio_enhance" in body:
+            match["audio_enhance"] = bool(body["audio_enhance"])
         if "speed" in body:
             match["speed"] = float(body["speed"])
         if "font" in body:
@@ -1022,20 +1272,51 @@ def api_patch_highlight(highlight_id):
                 return jsonify({"error": f"unknown font '{font_key}'"}), 400
             match["font"] = font_key
         if "caption_color" in body:
+            # Either a named key or a "#RRGGBB" from the editor's colour picker.
             color_key = str(body["caption_color"])
-            if color_key not in CAPTION_COLORS:
+            if color_key not in CAPTION_COLORS and resolve_caption_color(color_key) is None:
                 return jsonify({"error": f"unknown caption_color '{color_key}'"}), 400
             match["caption_color"] = color_key
         if "caption_size" in body:
-            size_key = str(body["caption_size"])
-            if size_key not in CAPTION_SIZES:
-                return jsonify({"error": f"unknown caption_size '{size_key}'"}), 400
-            match["caption_size"] = size_key
+            # Either a legacy s/m/l/xl key or a raw number of script units at
+            # the 1920-tall canvas (the editor's numeric stepper). Stored as
+            # given; resolve_caption_size does the interpreting at render time.
+            raw_size = body["caption_size"]
+            if isinstance(raw_size, str) and raw_size in CAPTION_SIZES:
+                match["caption_size"] = raw_size
+            else:
+                try:
+                    size_number = float(raw_size)
+                except (TypeError, ValueError):
+                    return jsonify({"error": f"unknown caption_size '{raw_size}'"}), 400
+                lo, hi = CAPTION_SIZE_RANGE
+                if not (lo <= size_number <= hi):
+                    return jsonify({"error": f"caption_size out of range ({lo}-{hi})"}), 400
+                match["caption_size"] = int(round(size_number))
         if "caption_position" in body:
             position_key = str(body["caption_position"])
             if position_key not in CAPTION_POSITIONS:
                 return jsonify({"error": f"unknown caption_position '{position_key}'"}), 400
             match["caption_position"] = position_key
+        # Free caption position, dragged over the editor's visualizer: 0-1
+        # fractions of the output frame, or null to go back to the
+        # bottom/middle/top preset in caption_position. Both axes always travel
+        # together (the editor PATCHes them as a pair), but each is validated on
+        # its own so a partial body can't wedge one axis at a stale value.
+        for axis in ("caption_pos_x", "caption_pos_y"):
+            if axis not in body:
+                continue
+            raw_axis = body[axis]
+            if raw_axis is None:
+                match[axis] = None
+                continue
+            try:
+                axis_value = float(raw_axis)
+            except (TypeError, ValueError):
+                return jsonify({"error": f"invalid {axis} '{raw_axis}'"}), 400
+            if not (0.0 <= axis_value <= 1.0):
+                return jsonify({"error": f"{axis} must be between 0 and 1"}), 400
+            match[axis] = axis_value
         if "caption_words" in body:
             words_count = int(body["caption_words"])
             if words_count not in (1, 2, 3):
@@ -1087,6 +1368,103 @@ def api_patch_highlight(highlight_id):
                 match.pop("music_track", None)
         if "music_volume" in body:
             match["music_volume"] = max(0.0, min(1.0, float(body["music_volume"])))
+        if "cta_id" in body:
+            cta_id = body["cta_id"]
+            if cta_id:
+                if cta_id != CTA_NONE_ID and not any(c["id"] == cta_id for c in _all_ctas()):
+                    return jsonify({"error": f"unknown cta_id '{cta_id}'"}), 400
+                match["cta_id"] = str(cta_id)
+            else:
+                match.pop("cta_id", None)
+        # Text template ("Plantilla") overlaid on the clip's first seconds.
+        # template=None/"" means no card; the kicker/headline stay stored so
+        # switching the template off and on again doesn't lose the text the
+        # user (or the hook generator) wrote.
+        if "template" in body:
+            template_id = body["template"]
+            if not template_id:
+                match.pop("template", None)
+            else:
+                template_id = str(template_id)
+                if template_id not in TEXT_TEMPLATE_IDS:
+                    return jsonify({"error": f"unknown template '{template_id}'"}), 400
+                match["template"] = template_id
+        for text_field in ("template_kicker", "template_headline"):
+            if text_field in body:
+                match[text_field] = str(body[text_field] or "").strip()
+        if "template_duration" in body:
+            try:
+                template_duration = float(body["template_duration"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid template_duration"}), 400
+            lo, hi = TEMPLATE_DURATION_RANGE
+            if not (lo <= template_duration <= hi):
+                return jsonify({"error": f"template_duration out of range ({lo}-{hi})"}), 400
+            match["template_duration"] = template_duration
+        if "template_logo" in body:
+            match["template_logo"] = bool(body["template_logo"])
+        # Where the card sits on the frame and how big it is. Same fractions
+        # the preview drags with, so moving the block in the editor and burning
+        # it at export read the identical numbers.
+        for geo_field, lo, hi in (
+            ("template_x", -1.0, 2.0),
+            ("template_y", -1.0, 2.0),
+            ("template_scale", 0.15, 3.0),
+            ("template_width_frac", 0.15, 1.0),
+            ("template_headline_size", 0.02, 0.14),
+        ):
+            if geo_field in body:
+                try:
+                    value = float(body[geo_field])
+                except (TypeError, ValueError):
+                    return jsonify({"error": f"invalid {geo_field}"}), 400
+                match[geo_field] = min(max(value, lo), hi)
+        if "template_headline_color" in body:
+            color = str(body["template_headline_color"] or "").strip()
+            if color and not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                return jsonify({"error": "invalid template_headline_color"}), 400
+            match["template_headline_color"] = color
+        if "template_headline_color_runs" in body:
+            headline_len = len(match.get("template_headline", "") or "")
+            runs = []
+            for run in body["template_headline_color_runs"] or []:
+                if not isinstance(run, dict):
+                    return jsonify({"error": "invalid template_headline_color_runs"}), 400
+                try:
+                    start = int(run["start"])
+                    end = int(run["end"])
+                except (KeyError, TypeError, ValueError):
+                    return jsonify({"error": "invalid template_headline_color_runs"}), 400
+                start = max(0, min(start, headline_len))
+                end = max(0, min(end, headline_len))
+                if end <= start:
+                    continue
+                run_color = str(run.get("color") or "").strip()
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", run_color):
+                    return jsonify({"error": "invalid template_headline_color_runs"}), 400
+                runs.append({"start": start, "end": end, "color": run_color})
+            match["template_headline_color_runs"] = runs
+        if "template_bg_color" in body:
+            bg_color = str(body["template_bg_color"] or "").strip()
+            if bg_color and not re.fullmatch(r"#[0-9a-fA-F]{6}", bg_color):
+                return jsonify({"error": "invalid template_bg_color"}), 400
+            match["template_bg_color"] = bg_color
+        if "template_bg_opacity" in body:
+            try:
+                bg_opacity = float(body["template_bg_opacity"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid template_bg_opacity"}), 400
+            match["template_bg_opacity"] = max(0.0, min(1.0, bg_opacity))
+        if "overlays" in body:
+            match["overlays"] = _sanitize_overlays(body["overlays"])
+        if "caption_splits" in body:
+            try:
+                match["caption_splits"] = sorted({round(float(k), 3) for k in body["caption_splits"] or []})
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid caption_splits"}), 400
+        if "caption_group_keys" in body and not body["caption_group_keys"]:
+            match.pop("caption_group_keys", None)
+            match.pop("caption_group_words", None)
         if "caption_time_overrides" in body:
             match["caption_time_overrides"] = [
                 {
@@ -1132,6 +1510,459 @@ def _export_output_path(source_path: str, highlight_id: int) -> Path:
     return Path(LOCAL_OUTPUT_DIR) / f"{stem}.clip{highlight_id}.mp4"
 
 
+@app.route("/api/template_preview.png")
+def api_template_preview():
+    """The template card rendered exactly as the export will burn it, as a
+    transparent PNG the editor lays over its 9:16 preview. Rendering it
+    server-side instead of re-implementing the layout in CSS is what keeps
+    "preview = export" true here: font metrics, wrapping and auto-shrinking
+    all come from the same PIL code that renders the real frame."""
+    template_id = request.args.get("template", "")
+    if template_id not in TEXT_TEMPLATE_IDS:
+        abort(404)
+    # The card is rendered for the real output frame, not always 9:16: type
+    # sizes are relative to the frame height, so the same headline is a
+    # different shape on a vertical clip and on a wide one. The editor sends
+    # the frame it is actually previewing.
+    try:
+        frame_w = max(int(request.args.get("frame_w", 1080)), 16)
+        frame_h = max(int(request.args.get("frame_h", 1920)), 16)
+    except (TypeError, ValueError):
+        frame_w, frame_h = 1080, 1920
+    # Rendered to a per-request temp file and served from memory: the editor
+    # re-fetches this on every keystroke, so a single shared path on disk would
+    # let one request serve another's half-written PNG.
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        png_path = tmp.name
+    def _float_arg(name):
+        raw = request.args.get(name)
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    def _runs_arg(name):
+        raw = request.args.get(name)
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, list) else None
+
+    try:
+        rendered = clipper.render_template_block_png(
+            png_path, frame_w, frame_h,
+            template=template_id,
+            kicker=request.args.get("kicker", ""),
+            headline=request.args.get("headline", ""),
+            logo_path=None if request.args.get("logo", "1") != "0" else "",
+            width_frac=_float_arg("width"),
+            headline_color=request.args.get("color") or None,
+            headline_size_frac=_float_arg("font_size"),
+            headline_color_runs=_runs_arg("color_runs"),
+            bg_color=request.args.get("bg_color") or None,
+            bg_opacity=_float_arg("bg_opacity"),
+        )
+        if rendered is None:
+            abort(404)
+        _, block_w, block_h = rendered
+        with open(png_path, "rb") as f:
+            payload = f.read()
+    finally:
+        if os.path.exists(png_path):
+            os.remove(png_path)
+    response = send_file(io.BytesIO(payload), mimetype="image/png")
+    response.headers["Cache-Control"] = "no-store"
+    # The editor sizes the draggable box from the block's own aspect; these
+    # save it a second round-trip to measure the decoded image.
+    response.headers["X-Block-W"] = str(block_w)
+    response.headers["X-Block-H"] = str(block_h)
+    response.headers["Access-Control-Expose-Headers"] = "X-Block-W, X-Block-H"
+    return response
+
+
+@app.route("/api/overlays", methods=["POST"])
+def api_upload_overlay():
+    """Takes one image from the editor's "Agregar PNG" button and parks it in
+    output/overlay_assets under a content-addressed name, so re-uploading the
+    same logo twice doesn't pile up copies. Returns the geometry the editor
+    needs to place it at a sane starting size."""
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "no file"}), 400
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in OVERLAY_EXTENSIONS:
+        return jsonify({"error": f"unsupported extension '{ext}'"}), 400
+    payload = file.read(OVERLAY_MAX_BYTES + 1)
+    if len(payload) > OVERLAY_MAX_BYTES:
+        return jsonify({"error": "file too large (max 12 MB)"}), 400
+
+    OVERLAY_DIR.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha1(payload).hexdigest()[:16] + ext
+    path = OVERLAY_DIR / name
+    if not path.exists():
+        path.write_bytes(payload)
+
+    try:
+        from PIL import Image as PILImage
+
+        with PILImage.open(path) as img:
+            width, height = img.size
+    except Exception as e:
+        path.unlink(missing_ok=True)
+        return jsonify({"error": f"not a readable image: {e}"}), 400
+
+    return jsonify({
+        "file": name,
+        "label": os.path.basename(file.filename)[:80],
+        "width": width,
+        "height": height,
+    })
+
+
+@app.route("/api/overlays/<path:filename>", methods=["GET"])
+def api_overlay_file(filename):
+    name = os.path.basename(filename)
+    if not (OVERLAY_DIR / name).is_file():
+        abort(404)
+    return send_from_directory(OVERLAY_DIR, name)
+
+
+# --- Biblioteca de CTAs (sección "CTA" del panel) ---------------------------
+# Cada clip elige qué outro lleva (h["cta_id"]). Sin cta_id = el CTA original
+# del podcast Constantini, así los clips viejos exportan igual que antes.
+#   type "card":  video real desenfocado + portada (opcional) + texto, como el
+#                 original, con line1/highlight/line2 propios.
+#   type "video": un video ya armado que se pega tal cual después del clip.
+CTA_DIR = Path(__file__).resolve().parent / "output" / "cta_assets"
+CTA_NONE_ID = "none"
+CTA_DEFAULT_ID = "constantini"
+CTA_BUILTINS = [{
+    "id": CTA_DEFAULT_ID,
+    "name": "Podcast Constantini",
+    "type": "card",
+    **clipper.DEFAULT_CTA_TEXT,
+    "image": None,  # None = assets/cta_portada.png
+    "builtin": True,
+}]
+CTA_IMAGE_EXTENSIONS = {".png", ".webp", ".jpg", ".jpeg"}
+CTA_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
+CTA_VIDEO_MAX_BYTES = 500 * 1024 * 1024
+_cta_lock = threading.Lock()
+
+
+def _cta_library_path() -> Path:
+    os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+    return Path(LOCAL_OUTPUT_DIR) / "cta_library.json"
+
+
+def _load_custom_ctas() -> list:
+    path = _cta_library_path()
+    if not path.exists():
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_custom_ctas(ctas: list) -> None:
+    path = _cta_library_path()
+    tmp = path.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(ctas, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _all_ctas() -> list:
+    return CTA_BUILTINS + _load_custom_ctas()
+
+
+def _find_cta(cta_id):
+    """cta_id del highlight -> entrada de la biblioteca, o None si es "Sin
+    CTA". Un id que ya no existe (CTA borrado) cae al default en vez de
+    romper el export."""
+    if cta_id == CTA_NONE_ID:
+        return None
+    ctas = _all_ctas()
+    for c in ctas:
+        if c["id"] == (cta_id or CTA_DEFAULT_ID):
+            return c
+    return ctas[0]
+
+
+def _cta_image_path(cta: dict):
+    """Ruta de la portada para clipper: None = portada Constantini, "" = sin
+    imagen."""
+    if cta.get("builtin"):
+        return None
+    return str(CTA_DIR / cta["image"]) if cta.get("image") else ""
+
+
+@app.route("/api/ctas", methods=["GET"])
+def api_list_ctas():
+    return jsonify({"ctas": _all_ctas(), "default": CTA_DEFAULT_ID, "none": CTA_NONE_ID})
+
+
+@app.route("/api/ctas", methods=["POST"])
+def api_create_cta():
+    """Alta de un CTA. multipart: type (card|video), name, y para card
+    line1/highlight/line2 + file (portada opcional); para video, file."""
+    try:
+        cta_type = request.form.get("type", "card")
+        name = (request.form.get("name") or "").strip()[:60]
+        if cta_type not in ("card", "video"):
+            return jsonify({"error": f"unknown type '{cta_type}'"}), 400
+        if not name:
+            return jsonify({"error": "falta el nombre"}), 400
+        file = request.files.get("file")
+        CTA_DIR.mkdir(parents=True, exist_ok=True)
+        cta_id = "cta_" + hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:10]
+        entry = {"id": cta_id, "name": name, "type": cta_type}
+
+        if cta_type == "card":
+            entry["line1"] = (request.form.get("line1") or "").strip()[:80]
+            entry["highlight"] = (request.form.get("highlight") or "").strip()[:40]
+            entry["line2"] = (request.form.get("line2") or "").strip()[:120]
+            entry["image"] = None
+            try:
+                entry["duration"] = round(min(max(float(request.form.get("duration") or CTA_OUTRO_DURATION_SECONDS), 1.0), 15.0), 1)
+            except ValueError:
+                entry["duration"] = CTA_OUTRO_DURATION_SECONDS
+            if file is not None and file.filename:
+                ext = os.path.splitext(file.filename)[1].lower()
+                if ext not in CTA_IMAGE_EXTENSIONS:
+                    return jsonify({"error": f"imagen no soportada '{ext}'"}), 400
+                payload = file.read(OVERLAY_MAX_BYTES + 1)
+                if len(payload) > OVERLAY_MAX_BYTES:
+                    return jsonify({"error": "imagen muy pesada (máx 12 MB)"}), 400
+                img_name = hashlib.sha1(payload).hexdigest()[:16] + ext
+                (CTA_DIR / img_name).write_bytes(payload)
+                entry["image"] = img_name
+            if not (entry["line1"] or entry["highlight"] or entry["line2"] or entry["image"]):
+                return jsonify({"error": "el CTA necesita texto o imagen"}), 400
+        else:
+            if file is None or not file.filename:
+                return jsonify({"error": "falta el video"}), 400
+            ext = os.path.splitext(file.filename)[1].lower()
+            if ext not in CTA_VIDEO_EXTENSIONS:
+                return jsonify({"error": f"video no soportado '{ext}'"}), 400
+            raw = CTA_DIR / f"{cta_id}.upload{ext}"
+            file.save(raw)
+            if raw.stat().st_size > CTA_VIDEO_MAX_BYTES:
+                raw.unlink(missing_ok=True)
+                return jsonify({"error": "video muy pesado (máx 500 MB)"}), 400
+            # Normalizado a mp4 h264/aac: el navegador lo reproduce en el
+            # preview (un .mov/.webm cualquiera no siempre) y el export lo
+            # concatena sin sorpresas de códec.
+            video_name = f"{cta_id}.mp4"
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw),
+                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                     "-movflags", "+faststart", str(CTA_DIR / video_name)],
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                (CTA_DIR / video_name).unlink(missing_ok=True)
+                return jsonify({"error": "no se pudo leer el video"}), 400
+            finally:
+                raw.unlink(missing_ok=True)
+            entry["video"] = video_name
+            entry["duration"] = round(clipper._ffprobe_duration(str(CTA_DIR / video_name)), 2)
+
+        with _cta_lock:
+            ctas = _load_custom_ctas()
+            ctas.append(entry)
+            _save_custom_ctas(ctas)
+        return jsonify(entry)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ctas/<cta_id>", methods=["DELETE"])
+def api_delete_cta(cta_id):
+    """Borra un CTA propio (los builtin no). Los archivos quedan en
+    cta_assets: son chicos y un clip ya exportado no los necesita."""
+    with _cta_lock:
+        ctas = _load_custom_ctas()
+        kept = [c for c in ctas if c["id"] != cta_id]
+        if len(kept) == len(ctas):
+            return jsonify({"error": "CTA inexistente o no borrable"}), 404
+        _save_custom_ctas(kept)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/ctas/<cta_id>/overlay.png", methods=["GET"])
+def api_cta_overlay(cta_id):
+    """PNG portada+texto del CTA a tamaño de cuadro, el mismo que compone el
+    export -- el preview lo pone encima del video desenfocado."""
+    cta = _find_cta(cta_id)
+    if cta is None or cta["type"] != "card":
+        abort(404)
+    frame_w = max(64, min(int(request.args.get("frame_w", 1080)), 2160))
+    frame_h = max(64, min(int(request.args.get("frame_h", 1920)), 3840))
+    cache_dir = CTA_DIR / "_preview"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(json.dumps(
+        [cta.get("line1"), cta.get("highlight"), cta.get("line2"), cta.get("image"),
+         frame_w, frame_h], ensure_ascii=False).encode()).hexdigest()[:16]
+    out = cache_dir / f"{key}.png"
+    if not out.exists():
+        clipper._render_cta_overlay_png(
+            str(out), frame_w, frame_h,
+            text={k: cta.get(k, "") for k in ("line1", "highlight", "line2")},
+            portada_path=_cta_image_path(cta),
+        )
+    return send_from_directory(cache_dir, out.name)
+
+
+@app.route("/api/ctas/<cta_id>/video", methods=["GET"])
+def api_cta_video(cta_id):
+    cta = _find_cta(cta_id)
+    if cta is None or cta["type"] != "video" or not (CTA_DIR / cta["video"]).is_file():
+        abort(404)
+    return send_from_directory(CTA_DIR, cta["video"], conditional=True)
+
+
+@app.route("/api/fonts/<path:filename>", methods=["GET"])
+def api_font_file(filename):
+    name = os.path.basename(filename)
+    if not (FONTS_DIR / name).is_file():
+        abort(404)
+    return send_from_directory(FONTS_DIR, name)
+
+
+TEMPLATE_HOOK_PROMPT = """Sos un editor de contenido que arma placas de texto para clips verticales de un podcast en español rioplatense.
+
+Te paso la transcripción de un clip. Escribí una placa que funcione como gancho para que alguien que scrollea se detenga a mirarlo.
+
+Reglas:
+- "kicker": 2 a 4 palabras, el tema o la categoría del clip (va en una cajita naranja arriba, en mayúsculas). Ej: "DOLAR", "PLAZO FIJO", "ERROR COMUN".
+- "headline": el gancho. Una sola frase de 6 a 14 palabras, concreta y específica de lo que se dice en ESTE clip. Nada de clickbait genérico ni de promesas que el clip no cumple. Sin signos de exclamación. Sin comillas.
+- Ambos en español rioplatense, sin emojis.
+
+Respondé SOLO con JSON:
+{{"kicker": "...", "headline": "..."}}
+
+Transcripción del clip:
+{text}
+"""
+
+
+@app.route("/api/highlights/<int:highlight_id>/template_hook", methods=["POST"])
+def api_template_hook(highlight_id):
+    """Generates the template's kicker + headline from what is actually said
+    in this clip. Returns them for the editor to drop into the (editable)
+    inputs -- it deliberately does NOT persist anything, so a generated hook
+    the user doesn't like never overwrites one they typed by hand: the panel
+    PATCHes it like any manual edit once they keep it."""
+    cache_path = _highlights_cache_path(SOURCE_PATH)
+    with _highlights_lock:
+        if not cache_path.exists():
+            return jsonify({"error": "no highlights cached yet"}), 404
+        with open(cache_path) as f:
+            highlights = json.load(f)
+        h = next((x for x in highlights if x.get("id") == highlight_id), None)
+        if h is None:
+            return jsonify({"error": f"highlight {highlight_id} not found"}), 404
+        h = dict(h)
+
+    start = float(h["start_time"])
+    end = float(h["end_time"])
+    transcript = _get_transcript(SOURCE_PATH)
+    text = _transcript_lines_for_range(transcript, start, end)
+    if not text.strip():
+        text = str(h.get("transcript_override") or h.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "no transcript text for this clip"}), 400
+
+    try:
+        parsed = _parse_json_loose(call_local_llm(TEMPLATE_HOOK_PROMPT.format(text=text)))
+    except Exception as e:
+        print(f"[editor] template_hook failed: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "kicker": str(parsed.get("kicker", "")).strip(),
+        "headline": str(parsed.get("headline", "")).strip(),
+    })
+
+
+@app.route("/api/highlights/<int:highlight_id>/arrange_captions", methods=["POST"])
+def api_arrange_captions(highlight_id):
+    """"Acomodar subtitulos": regroups the clip's captions with the LLM and
+    persists the result as `caption_group_keys` (word_start of each box's first
+    word) tied to the `caption_words` it was generated for. Replaces any manual
+    `caption_splits`, which were cuts on top of the old grouping."""
+    cache_path = _highlights_cache_path(SOURCE_PATH)
+    with _highlights_lock:
+        if not cache_path.exists():
+            return jsonify({"error": "no highlights cached yet"}), 404
+        with open(cache_path) as f:
+            highlights = json.load(f)
+        h = next((x for x in highlights if x.get("id") == highlight_id), None)
+        if h is None:
+            return jsonify({"error": f"highlight {highlight_id} not found"}), 404
+        h = dict(h)
+
+    try:
+        words_per_group = int(h.get("caption_words", DEFAULT_WORDS_PER_GROUP))
+        transcript = _get_diarized_transcript(SOURCE_PATH)
+        words = words_for_window(
+            transcript.get("segments", []), float(h["start_time"]), float(h["end_time"]),
+            time_overrides=h.get("caption_time_overrides"),
+        )
+        if words_per_group <= 1 or not words:
+            return jsonify({"error": "con 1 palabra a la vez no hay nada que acomodar"}), 400
+        # 1) Corregir palabras mal escritas / mal oídas (1:1, se guardan como
+        # correcciones de palabra, igual que un doble clic manual). 2) Agrupar
+        # sobre el texto ya corregido: una corrección puede cambiar puntuación.
+        corrections = correct_clip_words(words, context=str(h.get("title") or ""))
+        if corrections:
+            overrides = _load_overrides(SOURCE_PATH)
+            for c in corrections:
+                overrides.setdefault("words", {})[_word_key(c["word_start"], c["word_end"])] = {
+                    **overrides.get("words", {}).get(_word_key(c["word_start"], c["word_end"]), {}),
+                    "text": c["to"],
+                    "auto_from": c["from"],
+                }
+            _save_overrides(SOURCE_PATH, overrides)
+            _apply_transcript_overrides(transcript, overrides)
+            words = words_for_window(
+                transcript.get("segments", []), float(h["start_time"]), float(h["end_time"]),
+                time_overrides=h.get("caption_time_overrides"),
+            )
+        keys = arrange_caption_group_keys(words, words_per_group)
+    except Exception as e:
+        print(f"[editor] arrange_captions failed: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
+    with _highlights_lock:
+        with open(cache_path) as f:
+            highlights = json.load(f)
+        match = next((x for x in highlights if x.get("id") == highlight_id), None)
+        if match is None:
+            return jsonify({"error": f"highlight {highlight_id} not found"}), 404
+        match["caption_group_keys"] = keys
+        match["caption_group_words"] = words_per_group
+        match["caption_splits"] = []
+        _atomic_write_json(cache_path, highlights)
+    return jsonify({
+        "caption_group_keys": keys,
+        "caption_group_words": words_per_group,
+        "caption_splits": [],
+        "corrections": [{"from": c["from"].strip(), "to": c["to"].strip()} for c in corrections],
+    })
+
+
 @app.route("/api/highlights/<int:highlight_id>/export", methods=["POST"])
 def api_export_highlight(highlight_id):
     """Real render of one highlight, applying every setting the editor
@@ -1157,7 +1988,103 @@ def api_export_highlight(highlight_id):
     if duration <= 0:
         return jsonify({"error": "invalid start_time/end_time"}), 400
 
-    out_path = str(_export_output_path(SOURCE_PATH, highlight_id))
+    final_path = str(_export_output_path(SOURCE_PATH, highlight_id))
+    with _export_jobs_lock:
+        job = _export_jobs.get(highlight_id)
+        if job and job["state"] == "running":
+            # Doble click / segunda pestaña: no arrancar otro render que pise
+            # el mismo archivo (era el 'moov atom not found' del log).
+            return jsonify(_export_job_public(job)), 409
+        job = {
+            "state": "running", "stage": "Preparando…", "step": 0,
+            "total": _export_total_steps(h), "error": None,
+            "started": time.time(), "finished": None,
+            "url": f"/api/highlights/{highlight_id}/export/file",
+        }
+        _export_jobs[highlight_id] = job
+    threading.Thread(
+        target=_run_export_job, args=(highlight_id, h, final_path, job), daemon=True,
+    ).start()
+    return jsonify(_export_job_public(job)), 202
+
+
+@app.route("/api/highlights/<int:highlight_id>/export/status", methods=["GET"])
+def api_export_status(highlight_id):
+    with _export_jobs_lock:
+        job = _export_jobs.get(highlight_id)
+        if job is None:
+            return jsonify({"state": "idle"})
+        return jsonify(_export_job_public(job))
+
+
+# Export en segundo plano: antes el POST duraba todo el render (minutos) y el
+# navegador podía cortar la conexión ("Failed to fetch") aunque el server
+# siguiera trabajando. Ahora el POST devuelve al toque y el frontend consulta
+# /export/status, que dice en qué etapa está.
+_export_jobs: dict = {}
+_export_jobs_lock = threading.Lock()
+MAX_CONCURRENT_EXPORTS = 2
+_EXPORT_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXPORTS)
+
+
+def _export_job_public(job: dict) -> dict:
+    out = dict(job)
+    end = job["finished"] or time.time()
+    out["elapsed"] = round(end - job["started"], 1)
+    return out
+
+
+def _export_total_steps(h: dict) -> int:
+    # recorte + capas + outro, más los opcionales: audio, subs, velocidad, música
+    return (3 + bool(h.get("audio_enhance")) + bool(h.get("captions_enabled", True))
+            + (float(h.get("speed", 1.0)) != 1.0) + bool(h.get("music_track")))
+
+
+def _run_export_job(highlight_id: int, h: dict, final_path: str, job: dict) -> None:
+    def stage(label: str) -> None:
+        with _export_jobs_lock:
+            job["step"] += 1
+            job["stage"] = label
+        print(f"[editor] export {highlight_id}: {job['step']}/{job['total']} {label}", flush=True)
+
+    # Se renderiza sobre un archivo de trabajo y recién al final se reemplaza
+    # el clip exportado: el anterior sigue reproducible mientras tanto y un
+    # render que falla a la mitad no deja un mp4 roto en su lugar.
+    out_path = final_path + ".work.mp4"
+    try:
+        with _export_jobs_lock:
+            job["stage"] = "En cola…"
+        # Cada export ya usa varios cores (libx264/DeepFilter): más de 2 a la
+        # vez no termina antes, solo reparte la CPU y dispara la RAM.
+        with _EXPORT_SLOTS:
+            with _export_jobs_lock:
+                job["stage"] = "Preparando…"
+            _render_export(highlight_id, h, out_path, stage)
+        os.replace(out_path, final_path)
+        with _export_jobs_lock:
+            job.update(state="done", stage="Listo", finished=time.time())
+    except Exception as exc:
+        print(f"[editor] export failed for highlight {highlight_id}: {exc!r}", flush=True)
+        with _export_jobs_lock:
+            job.update(state="error", error=str(exc), finished=time.time())
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+
+def _render_export(highlight_id: int, h: dict, out_path: str, stage) -> None:
+    # Todas las pasadas que re-codifican antes del outro son intermedias
+    # (h264_videotoolbox, ~2x más rápido); solo la concatenación del outro
+    # --la última que toca el video-- usa libx264. Ver encoding.py.
+    with intermediate_encodes():
+        _render_export_passes(highlight_id, h, out_path, stage)
+
+
+def _render_export_passes(highlight_id: int, h: dict, out_path: str, stage) -> None:
+    final_encoded = False
+    start_time = float(h["start_time"])
+    end_time = float(h["end_time"])
+    duration = end_time - start_time
 
     cut_segments = [
         (float(c["start_time"]) - start_time, float(c["end_time"]) - start_time)
@@ -1168,79 +2095,234 @@ def api_export_highlight(highlight_id):
     crop_enabled = bool(h.get("crop_enabled", False))
     crop_mode, manual_keyframes = _manual_crop_keyframes(h)
 
-    try:
-        if crop_enabled and manual_keyframes:
-            # The editor's own rectangles win: what the vertical preview shows
-            # is what gets rendered. Automatic active-speaker tracking below is
-            # only the fallback for a clip whose crop was switched on but never
-            # framed by hand.
-            clipper.crop_clip_manual(
-                SOURCE_PATH, start_time, end_time, EXPORT_ASPECT_RATIO, out_path,
-                keyframes=manual_keyframes,
-                mode=crop_mode,
-                cut_segments=cut_segments,
-            )
-        else:
-            clipper.crop_clip_local(
-                SOURCE_PATH, start_time, end_time, EXPORT_ASPECT_RATIO, out_path,
-                cut_segments=cut_segments,
-                crop_enabled=crop_enabled,
-            )
+    stage("Recortando y armando el clip…")
+    if crop_enabled and manual_keyframes:
+        # The editor's own rectangles win: what the vertical preview shows
+        # is what gets rendered. Automatic active-speaker tracking below is
+        # only the fallback for a clip whose crop was switched on but never
+        # framed by hand.
+        clipper.crop_clip_manual(
+            SOURCE_PATH, start_time, end_time, EXPORT_ASPECT_RATIO, out_path,
+            keyframes=manual_keyframes,
+            mode=crop_mode,
+            cut_segments=cut_segments,
+        )
+    else:
+        clipper.crop_clip_local(
+            SOURCE_PATH, start_time, end_time, EXPORT_ASPECT_RATIO, out_path,
+            cut_segments=cut_segments,
+            crop_enabled=crop_enabled,
+        )
 
-        if h.get("captions_enabled", True):
-            transcript = _get_diarized_transcript(SOURCE_PATH)
-            words = words_for_window(
-                transcript.get("segments", []), start_time, end_time,
-                time_overrides=h.get("caption_time_overrides"),
-            )
-            if cut_segments:
-                keep = editing.keep_segments_from_cuts(cut_segments, duration)
-                words = editing.remap_words_across_cuts(words, keep)
+    if h.get("audio_enhance"):
+        stage("Mejorando audio (DeepFilterNet)…")
+        # Antes de subtítulos/velocidad/música: limpia SOLO la voz del
+        # clip ya cortado (DeepFilterNet3), no el video fuente entero.
+        # Reusa el WAV que ya generó el preview (misma base + cortes): si el
+        # usuario lo escuchó en el editor, acá no se vuelve a correr la red.
+        tmp_enhanced = out_path + ".enhanced.mp4"
+        enhanced_wav = clipper.enhance_audio_preview(SOURCE_PATH, start_time, end_time, cut_segments)
+        clipper.mux_enhanced_audio(out_path, enhanced_wav, tmp_enhanced)
+        os.replace(tmp_enhanced, out_path)
 
-            font_key = h.get("font", DEFAULT_FONT_KEY)
-            caption_size = h.get("caption_size", "m")
-            tmp_subbed = out_path + ".subbed.mp4"
-            burn_subtitles(
-                out_path, words, tmp_subbed,
-                font_name=FONT_CHOICES.get(font_key, FONT_CHOICES[DEFAULT_FONT_KEY]),
-                size=CAPTION_SIZES.get(caption_size, CAPTION_SIZES["m"]),
-                position=h.get("caption_position", DEFAULT_CAPTION_POSITION),
-                style=h.get("caption_style", DEFAULT_CAPTION_STYLE),
-                color=h.get("caption_color", DEFAULT_CAPTION_COLOR),
-                words_per_group=h.get("caption_words", DEFAULT_WORDS_PER_GROUP),
-            )
-            os.replace(tmp_subbed, out_path)
+    speed = float(h.get("speed") or 1.0)
+    speed_applied = False
+    if h.get("captions_enabled", True):
+        stage("Quemando subtítulos…")
+        transcript = _get_diarized_transcript(SOURCE_PATH)
+        words = words_for_window(
+            transcript.get("segments", []), start_time, end_time,
+            time_overrides=h.get("caption_time_overrides"),
+        )
+        if cut_segments:
+            keep = editing.keep_segments_from_cuts(cut_segments, duration)
+            words = editing.remap_words_across_cuts(words, keep)
 
-        speed = float(h.get("speed", 1.0))
+        font_key = h.get("font", DEFAULT_FONT_KEY)
+        tmp_subbed = out_path + ".subbed.mp4"
         if speed != 1.0:
-            tmp_sped = out_path + ".sped.mp4"
-            clipper.apply_speed_local(out_path, speed, tmp_sped)
-            os.replace(tmp_sped, out_path)
+            stage(f"Quemando subtítulos y velocidad {speed}x…")
+        burn_subtitles(
+            out_path, words, tmp_subbed,
+            font_name=FONT_CHOICES.get(font_key, FONT_CHOICES[DEFAULT_FONT_KEY]),
+            size=resolve_caption_size(h.get("caption_size")),
+            position=h.get("caption_position", DEFAULT_CAPTION_POSITION),
+            style=h.get("caption_style", DEFAULT_CAPTION_STYLE),
+            color=h.get("caption_color", DEFAULT_CAPTION_COLOR),
+            words_per_group=h.get("caption_words", DEFAULT_WORDS_PER_GROUP),
+            pos=resolve_caption_pos(h.get("caption_pos_x"), h.get("caption_pos_y")),
+            caption_splits=h.get("caption_splits"),
+            caption_group_keys=_valid_group_keys(h, h.get("caption_words", DEFAULT_WORDS_PER_GROUP)),
+            speed=speed,  # misma pasada que los subtítulos (ass → setpts)
+        )
+        os.replace(tmp_subbed, out_path)
+        speed_applied = True
 
+    if speed != 1.0 and not speed_applied:
+        stage(f"Aplicando velocidad {speed}x…")
+        tmp_sped = out_path + ".sped.mp4"
+        clipper.apply_speed_local(out_path, speed, tmp_sped)
+        os.replace(tmp_sped, out_path)
+
+    # Overlay layers (the text template plus any PNG the user dropped on
+    # the frame) on top of everything the clip already shows. They go after
+    # the captions and after the speed change so their time windows are
+    # real seconds of the final video (compositing before apply_speed_local
+    # would stretch or shrink them with the footage), and before the CTA
+    # outro so they stay inside the clip instead of leaking into the
+    # appended outro. All of them are composited in one encode.
+    stage("Capas y plantilla…")
+    overlay_items = []
+    scratch_pngs = []
+    frame_w, frame_h, _fps = clipper._ffprobe_video_info(out_path)
+
+    template_id = h.get("template")
+    if template_id in TEXT_TEMPLATE_IDS:
+        block_png = out_path + ".tmplblock.png"
+        width_frac = float(h.get("template_width_frac") or clipper.TEMPLATE_BLOCK_W)
+        block = clipper.render_template_block_png(
+            block_png, frame_w, frame_h,
+            template=template_id,
+            kicker=h.get("template_kicker", ""),
+            headline=h.get("template_headline", ""),
+            logo_path=None if h.get("template_logo", True) else "",
+            width_frac=width_frac,
+            headline_color=h.get("template_headline_color") or None,
+            headline_size_frac=h.get("template_headline_size"),
+            headline_color_runs=h.get("template_headline_color_runs"),
+            bg_color=h.get("template_bg_color") or None,
+            bg_opacity=h.get("template_bg_opacity"),
+        )
+        if block:
+            scratch_pngs.append(block_png)
+            overlay_items.append({
+                "png": block_png,
+                "x": float(h.get("template_x", clipper.TEMPLATE_DEFAULT_X)),
+                "y": float(h.get("template_y", clipper.TEMPLATE_DEFAULT_Y)),
+                "w": width_frac * float(
+                    h.get("template_scale", clipper.TEMPLATE_DEFAULT_SCALE)),
+                "start": 0.0,
+                "end": float(h.get("template_duration", DEFAULT_TEMPLATE_DURATION)),
+                # Entrada de zocalo de noticiero: entra de costado y llega
+                # desenfocada. El preview del editor replica estos mismos
+                # numeros (ver ov-news-in en static/editor.html).
+                "slide_in": clipper.TEMPLATE_SLIDE_SECONDS,
+                "slide_from": clipper.TEMPLATE_SLIDE_FROM,
+                "blur_in": clipper.TEMPLATE_BLUR_SIGMA_AT_1080,
+            })
+
+    for layer in _sanitize_overlays(h.get("overlays")):
+        overlay_items.append({
+            "png": str(OVERLAY_DIR / layer["file"]),
+            "x": layer["x"],
+            "y": layer["y"],
+            "w": layer["w"],
+            "start": layer["start"],
+            "end": layer["end"],
+            "opacity": layer["opacity"],
+            # A logo or a sticker the user placed by hand should just be
+            # there, not swim in; the card is the thing that announces
+            # itself, so only it keeps the default fades.
+            "fade_in": 0.2 if layer["start"] > 0 else 0.0,
+            "fade_out": 0.2 if layer["end"] is not None else 0.0,
+            "anim": layer["anim_in"],
+            "anim_dur": layer["anim_dur"],
+        })
+
+    if overlay_items:
+        tmp_layers = out_path + ".layers.mp4"
+        try:
+            written = clipper.burn_overlay_items(out_path, tmp_layers, overlay_items)
+            if written:
+                os.replace(tmp_layers, out_path)
+        finally:
+            for png in scratch_pngs:
+                if os.path.exists(png):
+                    os.remove(png)
+
+    cta = _find_cta(h.get("cta_id"))
+    if cta is not None and cta["type"] == "video":
+        stage("Outro con CTA…")
+        tmp_carded = out_path + ".carded.mp4"
+        with intermediate_encodes(False):
+            clipper.append_video_outro(out_path, str(CTA_DIR / cta["video"]), tmp_carded)
+        final_encoded = True
+        os.replace(tmp_carded, out_path)
+
+    card_cta = cta is not None and cta["type"] == "card"
+    if card_cta:
+        stage("Outro con CTA…")
         source_duration = clipper._ffprobe_duration(SOURCE_PATH)
-        cta_duration = min(CTA_OUTRO_DURATION_SECONDS, max(source_duration - end_time, 0))
-        if cta_duration >= 0.5:
-            tmp_carded = out_path + ".carded.mp4"
-            clipper.append_blurred_cta_outro(
-                out_path, SOURCE_PATH, end_time, tmp_carded,
-                duration=cta_duration, blur_sigma=CTA_OUTRO_BLUR_SIGMA,
-            )
-            os.replace(tmp_carded, out_path)
+        cta_seconds = float(cta.get("duration") or CTA_OUTRO_DURATION_SECONDS)
+        cta_duration = min(cta_seconds, max(source_duration - end_time, 0))
+    else:
+        cta_duration = 0.0
+    cta_start = end_time
+    if card_cta and cta_duration < 0.5:
+        # The clip runs to (almost) the end of the source, so there is no
+        # following footage to blur under the CTA. Reuse the clip's own
+        # last seconds instead: they play once normally and once more
+        # blurred behind the CTA. Capped at the clip's length so a very
+        # short clip never reaches before its own start.
+        cta_duration = min(cta_seconds, duration)
+        cta_start = end_time - cta_duration
+    if cta_duration >= 0.5:
+        tmp_carded = out_path + ".carded.mp4"
+        # The outro has to keep the clip's own framing: with a manual crop
+        # (and above all in 2-camera "split" mode) the raw source frame is
+        # a 16:9 wide shot, so letting append_blurred_cta_outro center-crop
+        # it to 9:16 lands on whatever sits between the two cameras -- a
+        # wall, the desk -- instead of the stacked panes the viewer was
+        # just watching. Reframing the outro window through the same
+        # keyframes keeps the last framing on screen while it blurs out
+        # (_manual_keyframe_cuts clamps every keyframe before the window to
+        # 0.0 and lets the latest one win, which is exactly the framing in
+        # effect at the clip's end).
+        outro_src = None
+        try:
+            if crop_enabled and manual_keyframes:
+                outro_src = out_path + ".ctasrc.mp4"
+                clipper.crop_clip_manual(
+                    SOURCE_PATH, cta_start, cta_start + cta_duration,
+                    EXPORT_ASPECT_RATIO, outro_src,
+                    keyframes=manual_keyframes,
+                    mode=crop_mode,
+                )
+            with intermediate_encodes(False):
+                clipper.append_blurred_cta_outro(
+                    out_path, SOURCE_PATH, cta_start, tmp_carded,
+                    duration=cta_duration, blur_sigma=CTA_OUTRO_BLUR_SIGMA,
+                    outro_clip_path=outro_src,
+                    cta_text={k: cta.get(k, "") for k in ("line1", "highlight", "line2")},
+                    portada_path=_cta_image_path(cta),
+                )
+            final_encoded = True
+        finally:
+            if outro_src and os.path.exists(outro_src):
+                os.remove(outro_src)
+        os.replace(tmp_carded, out_path)
 
-        music_track = h.get("music_track")
-        if music_track:
-            music_path = MUSIC_DIR / str(music_track)
-            if not music_path.is_file():
-                return jsonify({"error": f"music track not found: {music_track}"}), 400
-            volume = float(h.get("music_volume", DEFAULT_MUSIC_VOLUME))
-            tmp_mixed = out_path + ".mixed.mp4"
-            clipper.mix_background_music(out_path, str(music_path), volume, tmp_mixed)
-            os.replace(tmp_mixed, out_path)
-    except Exception as exc:
-        print(f"[editor] export failed for highlight {highlight_id}: {exc!r}", flush=True)
-        return jsonify({"error": str(exc)}), 500
+    if not final_encoded:
+        # Sin outro (caso raro): lo último que se codificó fue intermedio
+        # (videotoolbox, archivo ~4x más pesado) -- pasada final a libx264.
+        tmp_final = out_path + ".final.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", out_path,
+             *FINAL_VIDEO_ARGS, "-c:a", "copy", tmp_final],
+            check=True,
+        )
+        os.replace(tmp_final, out_path)
 
-    return jsonify({"ok": True, "path": out_path, "url": f"/api/highlights/{highlight_id}/export/file"})
+    music_track = h.get("music_track")
+    if music_track:
+        stage("Mezclando música…")
+        music_path = MUSIC_DIR / str(music_track)
+        if not music_path.is_file():
+            raise RuntimeError(f"music track not found: {music_track}")
+        volume = float(h.get("music_volume", DEFAULT_MUSIC_VOLUME))
+        tmp_mixed = out_path + ".mixed.mp4"
+        clipper.mix_background_music(out_path, str(music_path), volume, tmp_mixed)
+        os.replace(tmp_mixed, out_path)
 
 
 @app.route("/api/highlights/<int:highlight_id>/export/file", methods=["GET"])
@@ -1249,6 +2331,65 @@ def api_export_highlight_file(highlight_id):
     if not out_path.exists():
         return jsonify({"error": "not exported yet"}), 404
     return send_file(out_path, conditional=True)
+
+
+@app.route("/api/highlights/<int:highlight_id>/audio_enhanced", methods=["GET"])
+def api_audio_enhanced_preview(highlight_id):
+    """Voz del clip pasada por DeepFilterNet3, para el `<audio>` secundario
+    del preview (mismo patrón que la música de fondo) -- no toca el video
+    fuente ni requiere haber exportado el clip todavía."""
+    cache_path = _highlights_cache_path(SOURCE_PATH)
+    with _highlights_lock:
+        if not cache_path.exists():
+            return jsonify({"error": "no highlights cached yet"}), 404
+        with open(cache_path) as f:
+            highlights = json.load(f)
+        h = next((x for x in highlights if x.get("id") == highlight_id), None)
+        if h is None:
+            return jsonify({"error": f"highlight {highlight_id} not found"}), 404
+        h = dict(h)
+
+    start_time = float(h["start_time"])
+    end_time = float(h["end_time"])
+    duration = end_time - start_time
+    if duration <= 0:
+        return jsonify({"error": "invalid start_time/end_time"}), 400
+    cut_segments = [
+        (float(c["start_time"]) - start_time, float(c["end_time"]) - start_time)
+        for c in h.get("cuts", [])
+    ]
+    cut_segments = [(s, e) for s, e in cut_segments if e > s] or None
+
+    try:
+        wav_path = clipper.enhance_audio_preview(SOURCE_PATH, start_time, end_time, cut_segments)
+    except Exception as exc:
+        print(f"[editor] audio preview enhance failed for highlight {highlight_id}: {exc!r}", flush=True)
+        return jsonify({"error": str(exc)}), 500
+    return send_file(wav_path, mimetype="audio/wav", conditional=True)
+
+
+MODEL_IDLE_UNLOAD_S = 600  # 10 min sin uso → se liberan DeepFilterNet y pyannote
+
+
+def _idle_model_reaper() -> None:
+    """Libera los modelos pesados que quedaron cargados si nadie los usa
+    hace MODEL_IDLE_UNLOAD_S. Con varios editores abiertos a la vez esto es
+    lo que evita que cada uno retenga ~1-2GB para siempre."""
+    from shorts_generator.local import diarizer, transcriber
+    while True:
+        time.sleep(60)
+        try:
+            if clipper._deepfilter_worker.close_if_idle(MODEL_IDLE_UNLOAD_S):
+                print("[idle] worker de DeepFilterNet liberado", flush=True)
+            if diarizer.unload_if_idle(MODEL_IDLE_UNLOAD_S):
+                print("[idle] pipeline de pyannote liberado", flush=True)
+            # Whisper corre una sola vez por video (después todo sale del
+            # cache .srt): el modelo se suelta en el primer tick tras usarlo.
+            # unload_mlx_model no hace nada mientras haya una en curso.
+            if transcriber.unload_mlx_model():
+                print("[idle] modelo de whisper (MLX) liberado", flush=True)
+        except Exception as e:
+            print(f"[idle] reaper: {e}", flush=True)
 
 
 def main():
@@ -1267,6 +2408,9 @@ def main():
 
     print(f"[editor] source: {SOURCE_PATH}", flush=True)
     print(f"[editor] http://localhost:{args.port}", flush=True)
+    threading.Thread(target=_warmup_preview, daemon=True, name="warmup-preview").start()
+    threading.Thread(target=_warmup_analysis, daemon=True, name="warmup-analysis").start()
+    threading.Thread(target=_idle_model_reaper, daemon=True, name="idle-reaper").start()
     app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
 
 

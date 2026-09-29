@@ -332,7 +332,7 @@ def crop_clip_two_camera(source_path: str, start_time: float, end_time: float,
     e.g. diarization unavailable, or fewer than two consistent faces found."""
     cut_path = out_path + ".cut.mp4"
     try:
-        _cut_subclip(source_path, start_time, end_time, cut_path)
+        _cut_subclip(source_path, start_time, end_time, cut_path, intermediate=True)
         try:
             turns = diarize_local(source_path)
             img_w, img_h, fps, duration = _probe_dims_and_fps(cut_path)
