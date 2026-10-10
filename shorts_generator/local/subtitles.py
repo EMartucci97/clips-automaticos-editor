@@ -39,7 +39,7 @@ from PIL import ImageFont
 
 from .diarizer import OTHER_LABEL, ROBERTO_LABEL
 from .llm import call_local_llm
-from .encoding import video_encode_args
+from .encoding import probe_display_video, video_encode_args
 
 # The default Homebrew `ffmpeg` bottle ships without libass, so the `ass`
 # filter used to burn subtitles doesn't exist there. `ffmpeg-full` (also
@@ -360,13 +360,8 @@ def _probe_resolution(video_path: str) -> Tuple[int, int]:
     real frame shape — a mismatch (e.g. authoring for a vertical 1080x1920
     canvas onto a horizontal 1920x1080 frame) is what caused captions to
     render distorted before this was auto-detected."""
-    out = subprocess.run(
-        [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", video_path],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    w, h = out.split("x")
-    return int(w), int(h)
+    w, h, _ = probe_display_video(video_path, FFPROBE_BIN)
+    return w, h
 
 
 def words_for_window(
@@ -424,14 +419,25 @@ def _style_for_speaker(speaker: str) -> str:
 
 
 def _strip_punct(text: str) -> str:
-    return re.sub(r"[.,]", "", text)
+    # Keeps decimal/thousand separators ("4,5%", "38.000"): only drops a
+    # "." or "," that is not sitting between digits.
+    return re.sub(r"[.,](?!\d)|(?<=\D)[.,]", "", text)
 
 
 def _extract_json_loose(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(json)?", "", text).rsplit("```", 1)[0]
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Anthropic (backup sin modo JSON) a veces antepone texto o un bloque
+        # ```json en el medio: tomar el primer objeto {...} de la respuesta.
+        start = text.find("{")
+        if start == -1:
+            raise ValueError(f"respuesta del LLM sin JSON: {text[:120]!r}")
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+        return obj
 
 
 CLEANUP_PROMPT = """Sos un corrector de transcripciones en español rioplatense. Te paso una lista numerada de palabras (con su índice original, empezando en 0) tal como las detectó un transcriptor automático (Whisper) en un fragmento de un podcast.
@@ -795,12 +801,18 @@ Reglas:
 - Si no estás seguro de qué se dijo, no la cambies.
 - Whisper se equivoca por SONIDO: el reemplazo de una palabra mal oída tiene que sonar parecido a lo transcripto (ej: "IPER" -> "hiper", "llevó" -> "llegó"). Si la palabra correcta según el contexto no suena parecido (ej: "Robert" -> "Francés"), NO la cambies: sería adivinar, no corregir.
 - Nunca cambies una palabra que forma una frase válida con sus vecinas (ej: "en un momento", "creo que en 200 mil" se quedan como están).
-- Cada reemplazo es para UNA palabra de la lista, y el reemplazo tiene como mucho 3 palabras (ej: "dec20" -> "de 20").
+- Cada reemplazo es para UNA palabra de la lista, y el reemplazo tiene como mucho 3 palabras (ej: "dec20" -> "de 20"). La única excepción son los números (ver abajo).
 - Mantené la puntuación que tenga la palabra original (coma, punto, signos).
-- No conviertas números entre letras y dígitos: eso no es un error.
+
+NÚMEROS -- en pantalla siempre van con dígitos, nunca con letras:
+- Cantidades: "cuarenta" -> "40", "quince" -> "15", "dos mil quinientos" -> "2.500", "cuarenta millones" -> "40 millones", "dos mil veinte" (año) -> "2020". Los artículos "un"/"una" se quedan ("un millón", "una casa"), y "uno" como pronombre también ("uno piensa").
+- Porcentajes: número y signo juntos, sin espacio: "40" + "%" -> "40%", "cuarenta por ciento" -> "40%".
+- Horarios: "las 8 de la mañana" / "las ocho de la mañana" -> "las 8:00 am", "ocho y media de la noche" -> "8:30 pm", "a las 15" -> "a las 15:00". Solo cuando claramente es una hora.
+- Proporciones: "uno a uno" -> "1:1", "dos a uno" -> "2:1".
+Cuando el número ocupa VARIAS palabras seguidas de la lista, devolvé un solo cambio con "i" = primera palabra, "j" = última palabra (inclusive) y el texto final, ej: {{"i": 20, "j": 22, "text": "40%"}}. Solo podés juntar palabras así para armar un número; nunca para otra cosa.
 
 Respondé ÚNICAMENTE con JSON válido, sin texto adicional:
-{{"changes": [{{"i": 12, "text": "palabra corregida"}}, ...]}}
+{{"changes": [{{"i": 12, "text": "palabra corregida"}}, {{"i": 20, "j": 22, "text": "40%"}}, ...]}}
 Si no hay nada que corregir: {{"changes": []}}
 
 Palabras:
@@ -837,15 +849,38 @@ def _is_capitalization_only(original: str, new: str) -> bool:
     return o != n and o == o.lower() and base(o) == base(n)
 
 
+# Spoken-number vocabulary: a digit rewrite is only accepted over words that
+# actually say a number ("cuarenta por ciento" -> "40%"), never over arbitrary text.
+_NUMBER_WORD_RE = re.compile(
+    r"\b(cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|"
+    r"catorce|quince|dieci\w*|veint\w*|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|"
+    r"noventa|cien|ciento|\w+cient[oa]s|quinient[oa]s|mil|millón|millon|millones|"
+    r"medio|media|cuarto)\b"
+)
+_NUMBER_MERGE_MAX_WORDS = 5
+
+
+def _is_number_format_change(original: str, new: str) -> bool:
+    """True if `new` writes with digits a number that `original` says (in
+    words or digits): the numeric formatting rules of CORRECTION_PROMPT."""
+    if not any(c.isdigit() for c in new):
+        return False
+    o = original.lower()
+    return any(c.isdigit() for c in o) or "%" in o or bool(_NUMBER_WORD_RE.search(o))
+
+
 def correct_clip_words(words: List[Dict], context: str = "") -> List[Dict]:
     """LLM pass of the "Acomodar subtitulos" button that fixes misspelled
-    words and words Whisper clearly mis-heard. Strictly 1:1 (one original word
-    -> its replacement), so every word keeps its own timing and its override
-    key (`word_start`/`word_end`). Words the user already corrected by hand
-    (`overridden`) only get proper-name capitalization / missing accents (an
-    all-lowercase word, same letters, e.g. after the "minúsculas" bulk edit); their text
-    is never rewritten. Returns the changes to persist:
-    [{"word_start", "word_end", "from", "to"}]. Raises if the LLM call fails."""
+    words, words Whisper clearly mis-heard, and writes numbers with digits
+    (40%, 8:00 am, 1:1). Word-level: every word keeps its own timing and its
+    override key (`word_start`/`word_end`). A number spoken over several words
+    is merged onto its first word and the rest are blanked ("" = merged-token
+    tail, same as a manual merge), only when `_is_number_format_change`
+    holds. Words the user already corrected by hand (`overridden`) only get
+    proper-name capitalization / missing accents or number formatting; their
+    text is never otherwise rewritten. Returns the changes to persist:
+    [{"word_start", "word_end", "from", "to", "tail"?}]; `tail` marks the
+    blanked words of a merge. Raises if the LLM call fails."""
     candidates = [
         (i, w) for i, w in enumerate(words)
         if (w.get("word") or "").strip()
@@ -858,7 +893,7 @@ def correct_clip_words(words: List[Dict], context: str = "") -> List[Dict]:
     changes: List[Dict] = []
     for start, end in _chunk_bounds(plain, _LLM_CHUNK_SIZE):
         chunk = plain[start:end]
-        cache_key = _llm_cache_key("correct_v3", {"words": chunk, "context": context_line})
+        cache_key = _llm_cache_key("correct_v4", {"words": chunk, "context": context_line})
         cached = _llm_cache_get(cache_key)
         if cached is not None:
             chunk_changes = cached["changes"]
@@ -866,27 +901,56 @@ def correct_clip_words(words: List[Dict], context: str = "") -> List[Dict]:
             numbered = "\n".join(f"{i}: {w['word']}" for i, w in enumerate(chunk))
             raw = call_local_llm(CORRECTION_PROMPT.format(context=context_line, numbered_words=numbered))
             chunk_changes = []
+            taken = set()
             for c in _extract_json_loose(raw).get("changes") or []:
                 i, text = int(c["i"]), str(c.get("text") or "").strip()
-                if not (0 <= i < len(chunk)) or not text or len(text.split()) > 3:
+                j = int(c.get("j", i))
+                if not (0 <= i <= j < len(chunk)) or not text or len(text.split()) > 3:
                     continue
-                if text == chunk[i]["word"]:
+                span_text = " ".join(chunk[k]["word"] for k in range(i, j + 1))
+                if text == span_text or taken & set(range(i, j + 1)):
                     continue
-                chunk_changes.append({"i": i, "text": text})
-            if len(chunk_changes) > max(3, _CORRECTION_MAX_RATIO * len(chunk)):
-                print(f"[subtitles] correction discarded: {len(chunk_changes)} changes in "
+                if j > i and (j - i + 1 > _NUMBER_MERGE_MAX_WORDS
+                              or not _is_number_format_change(span_text, text)):
+                    continue
+                taken.update(range(i, j + 1))
+                chunk_changes.append({"i": i, "j": j, "text": text})
+            # Only non-numeric edits count toward the rewrite guard: a
+            # number-heavy stretch legitimately gets many digit conversions.
+            wording = [c for c in chunk_changes if not _is_number_format_change(
+                " ".join(chunk[k]["word"] for k in range(c["i"], c["j"] + 1)), c["text"])]
+            if len(wording) > max(3, _CORRECTION_MAX_RATIO * len(chunk)):
+                print(f"[subtitles] correction discarded: {len(wording)} changes in "
                       f"{len(chunk)} words looks like a rewrite, not a fix", flush=True)
                 chunk_changes = []
             _llm_cache_set(cache_key, {"changes": chunk_changes})
         for c in chunk_changes:
-            _, w = candidates[start + c["i"]]
-            new_text = _match_word_shape(w["word"], c["text"])
-            if w.get("overridden") and not _is_capitalization_only(w["word"], new_text):
+            span = [candidates[start + k][1] for k in range(c["i"], c.get("j", c["i"]) + 1)]
+            first, last = span[0], span[-1]
+            span_text = " ".join(w["word"].strip() for w in span)
+            # Leading space from the first word, trailing punctuation from the last.
+            lead = first["word"][:len(first["word"]) - len(first["word"].lstrip())]
+            new_text = lead + _match_word_shape(last["word"].strip(), c["text"])
+            numeric = _is_number_format_change(span_text, c["text"])
+            if len(span) > 1 and not numeric:
                 continue
-            if new_text != w["word"]:
+            # A lone "un"/"una"/"uno" is an article or pronoun ("un millón",
+            # "uno piensa"), never "1" on screen; "uno a uno" goes as a merge.
+            if len(span) == 1 and _bare_token(first) in ("un", "una", "uno") and numeric:
+                continue
+            if any(w.get("overridden") for w in span) and not (
+                    numeric or _is_capitalization_only(first["word"], new_text)):
+                continue
+            if new_text == first["word"] and len(span) == 1:
+                continue
+            changes.append({
+                "word_start": first["word_start"], "word_end": first["word_end"],
+                "from": span_text, "to": new_text,
+            })
+            for w in span[1:]:
                 changes.append({
                     "word_start": w["word_start"], "word_end": w["word_end"],
-                    "from": w["word"], "to": new_text,
+                    "from": w["word"], "to": "", "tail": True,
                 })
     return changes
 
@@ -968,7 +1032,9 @@ _DANGLING_CONNECTORS = {
 }
 
 _SENTENCE_END_CHARS = (".", "!", "?", "…")
-_NUMBER_CONTINUATION_RE = re.compile(r"^[.,]\d")
+# Tokens that belong to the previous number: ".000" after "38", and a "%"
+# Whisper emitted as its own word ("40" + "%").
+_NUMBER_CONTINUATION_RE = re.compile(r"^(?:[.,]\d|%)")
 _BARE_STRIP_CHARS = ".,;:!?…¿¡\"'()«»"
 
 # Cost model for `_segment_sentence` (lower = better). Tuned so that, for
@@ -991,7 +1057,7 @@ def _break_cost(words: List[Dict], j: int) -> float:
     """Cost of ending a caption box between words[j-1] and words[j]."""
     prev_text = (words[j - 1].get("word") or "").strip()
     next_text = (words[j].get("word") or "").strip()
-    if _NUMBER_CONTINUATION_RE.match(next_text):
+    if not next_text or _NUMBER_CONTINUATION_RE.match(next_text):
         return _COST_FORBIDDEN
     cost = 0.0
     if prev_text.endswith((",", ";", ":")):
@@ -1020,9 +1086,11 @@ def _segment_sentence(words: List[Dict], s: int, e: int, words_per_group: int) -
         for k in range(n)
     ]
     break_cost = {j: _break_cost(words, s + j) for j in range(1, n)}
-    # "38" + ".000" is one number on screen: count it as a single word for sizing.
+    # "38" + ".000" / "40" + "%" is one number on screen, and blank words
+    # (merged-token tails) are not shown: neither counts as a word for sizing.
     continuation = [
-        1 if _NUMBER_CONTINUATION_RE.match((words[s + k].get("word") or "").strip()) else 0
+        1 if (not (words[s + k].get("word") or "").strip()
+              or _NUMBER_CONTINUATION_RE.match((words[s + k].get("word") or "").strip())) else 0
         for k in range(n)
     ]
 
@@ -1274,6 +1342,21 @@ def apply_group_splits(groups: List[tuple], words: List[Dict], split_keys) -> Li
 # mas largas si lo ocultan, para no dejar texto colgado en silencios largos.
 CAPTION_BRIDGE_MAX_GAP = 2.0
 
+# Una palabra en blanco solo se le suma al bloque anterior si en la
+# transcripcion original venia pegada a la palabra previa (la cola de una
+# palabra fusionada siempre lo esta). Palabras borradas que vienen despues de
+# una pausa o de un corte no estiran el bloque: si no, el ultimo subtitulo
+# quedaba congelado en pantalla durante todo el tramo borrado.
+CAPTION_BLANK_TAIL_MAX_GAP = 0.25
+
+
+def _blank_tail_continues(prev: Dict, cur: Dict) -> bool:
+    """True si la palabra en blanco `cur` sigue pegada a `prev` en tiempo
+    ORIGINAL (word_start/word_end: no los mueven cortes ni ajustes de timing)."""
+    p_end = prev.get("word_end", prev["end"])
+    c_start = cur.get("word_start", cur["start"])
+    return c_start - p_end <= CAPTION_BLANK_TAIL_MAX_GAP
+
 
 def build_ass(
     words: List[Dict],
@@ -1324,7 +1407,7 @@ def build_ass(
         if first is None:
             return min(x["start"] for x in ws), max(x["end"] for x in ws)
         e = g_end
-        while e < len(words) and not words[e]["word"].strip():
+        while e < len(words) and not words[e]["word"].strip() and _blank_tail_continues(words[e - 1], words[e]):
             e += 1
         ws = words[g_start + first:e]
         return min(x["start"] for x in ws), max(x["end"] for x in ws)

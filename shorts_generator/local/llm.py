@@ -53,7 +53,14 @@ def call_gemini_llm(prompt: str) -> str:
             "max_output_tokens": 8192,
         },
     )
-    return response.text or ""
+    text = response.text or ""
+    if not text.strip():
+        # Respuesta vacía (MAX_TOKENS, bloqueo de seguridad, etc.): tirar error
+        # para que call_local_llm use el backup en vez de devolver "" al parser.
+        cand = (response.candidates or [None])[0]
+        reason = getattr(cand, "finish_reason", None)
+        raise RuntimeError(f"gemini devolvió respuesta vacía (finish_reason={reason})")
+    return text
 
 
 def call_anthropic_llm(prompt: str) -> str:
@@ -74,7 +81,10 @@ def call_anthropic_llm(prompt: str) -> str:
         messages=[{"role": "user", "content": prompt}],
         extra_headers=extra_headers,
     )
-    return "".join(block.text for block in response.content if block.type == "text")
+    text = "".join(block.text for block in response.content if block.type == "text")
+    if not text.strip():
+        raise RuntimeError(f"anthropic devolvió respuesta vacía (stop_reason={response.stop_reason})")
+    return text
 
 
 def _call_provider(provider: str, prompt: str) -> str:

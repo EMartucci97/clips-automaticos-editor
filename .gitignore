@@ -10,3 +10,5 @@ fixtures/
 .claude_tmp/
 assets/music/
 benchmark/work/
+.env.bak*
+*.bak-*

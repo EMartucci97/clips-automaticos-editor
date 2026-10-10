@@ -293,6 +293,204 @@ def _transcribe_faster_whisper(media_path: str, language: Optional[str]):
     return segments, words_by_segment, float(getattr(info, "duration", 0.0))
 
 
+def _transcribe_engine(media_path: str, language: Optional[str]):
+    if _use_mlx():
+        return _transcribe_mlx(media_path, language)
+    return _transcribe_faster_whisper(media_path, language)
+
+
+# Tomas dictadas: alguien fuera de cámara le dice la frase al orador en voz
+# baja y él la repite fuerte. Whisper sobre todo el audio transcribe la frase
+# una sola vez y estira sus palabras sobre la toma baja. Regla: un tramo de voz
+# >= DICTATION_DB más bajo que la voz principal, cuyo texto se repite en los
+# segundos siguientes, no se subtitula (gana la repetición fuerte). Si el tramo
+# bajo NO se repite (ej. el orador baja la voz, otro hablante), se conserva.
+# LOCAL_WHISPER_DICTATION_DB=0 lo desactiva.
+_DICTATION_DB = float(os.getenv("LOCAL_WHISPER_DICTATION_DB", "8"))
+_DICTATION_LOOKAHEAD = 25.0   # s después del tramo bajo donde buscar la repetición
+_DICTATION_MATCH = 0.6        # fracción de palabras del tramo bajo que reaparecen en orden
+_DICTATION_MIN_WORDS = 3      # frases más cortas ("dale", "bueno") nunca se descartan
+_SR = 16000
+
+
+def _load_wav16k(media_path: str):
+    import subprocess
+    import numpy as np
+    res = subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", media_path, "-vn",
+         "-ac", "1", "-ar", str(_SR), "-f", "s16le", "-"],
+        capture_output=True,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg: {res.stderr.decode(errors='ignore')[-300:]}")
+    return np.frombuffer(res.stdout, dtype=np.int16)
+
+
+def _write_wav16k(path: str, samples) -> None:
+    import wave
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(_SR)
+        w.writeframes(samples.tobytes())
+
+
+def _speech_regions(samples, below_db: float) -> list:
+    """Tramos de voz (separados por >= 0,25 s de silencio) como (inicio, fin,
+    bajo). `bajo` = su nivel (p80 de frames de 50 ms) está >= below_db por
+    debajo de la voz principal (nivel que cubre el 60% del tiempo hablado,
+    ponderado por duración)."""
+    import numpy as np
+    hop = int(_SR * 0.05)
+    n = len(samples) // hop
+    if n == 0:
+        return []
+    x = samples[: n * hop].astype(np.float32) / 32768.0
+    db = 20 * np.log10(np.sqrt((x.reshape(n, hop) ** 2).mean(1)) + 1e-6)
+    voiced = db > -45
+    regs, i = [], 0
+    while i < n:
+        if not voiced[i]:
+            i += 1
+            continue
+        j, gap, k = i, 0, i
+        while k < n:
+            if voiced[k]:
+                j, gap = k, 0
+            else:
+                gap += 1
+                if gap >= 5:
+                    break
+            k += 1
+        if (j - i + 1) >= 8:  # >= 0,4 s
+            regs.append((i, j + 1))
+        i = k + 1
+    if len(regs) < 3:
+        return []
+    levels = np.array([np.percentile(db[a:b][voiced[a:b]], 80) for a, b in regs])
+    durs = np.array([b - a for a, b in regs], dtype=float)
+    order = np.argsort(levels)
+    cum = np.cumsum(durs[order]) / durs.sum()
+    ref = levels[order][min(len(order) - 1, int(np.searchsorted(cum, 0.6)))]
+    return [(a * 0.05, b * 0.05, bool(lv < ref - below_db)) for (a, b), lv in zip(regs, levels)]
+
+
+def _norm_tokens(words) -> list:
+    """Palabras normalizadas para comparar tomas: sin tildes ni puntuación y
+    sin la 's' final (whisper alterna "rusa"/"rusas", "la"/"las")."""
+    import unicodedata
+    out = []
+    for w in words:
+        t = unicodedata.normalize("NFD", (w.get("word") or "").lower())
+        t = re.sub(r"[^a-z0-9ñ]", "", "".join(c for c in t if unicodedata.category(c) != "Mn"))
+        if len(t) > 2 and t.endswith("s"):
+            t = t[:-1]
+        if t:
+            out.append(t)
+    return out
+
+
+def _lcs_len(a: list, b: list) -> int:
+    prev = [0] * (len(b) + 1)
+    for x in a:
+        cur = [0]
+        for j, y in enumerate(b):
+            cur.append(prev[j] + 1 if x == y else max(prev[j + 1], cur[j]))
+        prev = cur
+    return prev[-1]
+
+
+_PIECE_MIN = 1.5  # s: frases más cortas se juntan con la siguiente (whisper alucina con audios muy cortos)
+
+
+def _looks_hallucinated(words: list) -> bool:
+    """Basura típica de whisper en audios cortos: caracteres no latinos o la
+    misma palabra repetida en loop."""
+    text = " ".join(w["word"] for w in words)
+    if re.search(r"[^\x00-\u024f\s¿¡«»“”…—–'’]", text):
+        return True
+    tok = _norm_tokens(words)
+    return len(tok) >= 8 and len(set(tok)) / len(tok) < 0.4
+
+
+def _transcribe_dropping_dictation(media_path: str, language: Optional[str]):
+    """Como _transcribe_engine, pero aplicando la regla de tomas dictadas.
+
+    Si hay tramos en voz baja, whisper NO se pasa sobre el audio entero: cuando
+    ve dos tomas de la misma frase seguidas (la dictada y la fuerte, o dos tomas
+    fuertes) las colapsa en una y pierde/estira palabras (probado: silenciar o
+    atenuar el tramo bajo, o cortar solo alrededor de él, no alcanza). Se
+    transcribe cada frase (tramo entre silencios) por separado y cada tramo
+    bajo cuyo texto reaparece en el audio fuerte de los siguientes
+    _DICTATION_LOOKAHEAD s se descarta."""
+    if _DICTATION_DB <= 0:
+        return _transcribe_engine(media_path, language)
+    import tempfile
+    samples = _load_wav16k(media_path)
+    regions = _speech_regions(samples, _DICTATION_DB)
+    if not any(q for _, _, q in regions):
+        return _transcribe_engine(media_path, language)
+    duration = len(samples) / _SR
+    n_quiet = sum(1 for _, _, q in regions if q)
+    print(f"[transcribe/local] {n_quiet} tramos en voz baja: transcribo frase por frase y chequeo repeticiones", flush=True)
+
+    # Pedazos: un tramo bajo solo; tramos fuertes seguidos se juntan hasta
+    # _PIECE_MIN. Bordes en la mitad de cada silencio, así no se corta ninguna palabra.
+    groups = []
+    for a, b, q in regions:
+        if groups and not q and not groups[-1][2] and groups[-1][1] - groups[-1][0] < _PIECE_MIN:
+            groups[-1] = (groups[-1][0], b, False)
+        else:
+            groups.append((a, b, q))
+    pieces = []
+    for i, (a, b, q) in enumerate(groups):
+        pa = 0.0 if i == 0 else (groups[i - 1][1] + a) / 2
+        pb = duration if i == len(groups) - 1 else (b + groups[i + 1][0]) / 2
+        pieces.append((pa, pb, a, b, q))
+
+    out = []  # (start, end, quiet, segs, words_by_seg) en tiempo absoluto
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "piece.wav")
+        for pa, pb, a, b, quiet in pieces:
+            _write_wav16k(path, samples[int(pa * _SR):int(pb * _SR)])
+            # Sin pasarle la frase anterior como prompt: probado, whisper
+            # evita repetir lo que está en el prompt y se saltea la toma fuerte.
+            segs, wbs, _ = _transcribe_engine(path, language)
+            p_segs, p_words = [], []
+            for seg, ws in zip(segs, wbs):
+                ws = [
+                    {"start": round(min(pa + w["start"], pb), 3),
+                     "end": round(min(pa + w["end"], pb), 3),
+                     "word": w["word"].strip()}
+                    for w in ws if (w.get("word") or "").strip()
+                ]
+                if ws and _looks_hallucinated(ws):
+                    print(f"[transcribe/local] descarto alucinación {pa:.2f}-{pb:.2f}: {' '.join(w['word'] for w in ws)[:80]!r}", flush=True)
+                    continue
+                if ws:
+                    p_segs.append({"start": ws[0]["start"], "end": ws[-1]["end"],
+                                   "text": " ".join(w["word"] for w in ws)})
+                    p_words.append(ws)
+            out.append((a, b, quiet, p_segs, p_words))
+
+    segments, words_by_segment = [], []
+    for a, b, quiet, p_segs, p_words in out:
+        if quiet and p_words:
+            q_tok = _norm_tokens([w for ws in p_words for w in ws])
+            later = _norm_tokens([
+                w for a2, _, q2, _, pw in out if not q2 and a2 >= b - 0.01
+                for ws in pw for w in ws if w["start"] <= b + _DICTATION_LOOKAHEAD
+            ])
+            text = " ".join(s["text"] for s in p_segs)
+            if len(q_tok) >= _DICTATION_MIN_WORDS and _lcs_len(q_tok, later) >= _DICTATION_MATCH * len(q_tok):
+                print(f"[transcribe/local] dictado descartado {a:.2f}-{b:.2f}: {text!r}", flush=True)
+                continue
+            print(f"[transcribe/local] voz baja conservada {a:.2f}-{b:.2f}: {text!r}", flush=True)
+        segments.extend(p_segs)
+        words_by_segment.extend(p_words)
+    return segments, words_by_segment, duration
+
+
 def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
     """Run faster-whisper on a local file path, caching the result as .srt
     (+ a sidecar .words.json with word-level timestamps for subtitles)."""
@@ -325,10 +523,7 @@ def transcribe_local(media_path: str, language: Optional[str] = None) -> Dict:
                 )
                 return cached
 
-    if _use_mlx():
-        segments, words_by_segment, duration = _transcribe_mlx(media_path, language)
-    else:
-        segments, words_by_segment, duration = _transcribe_faster_whisper(media_path, language)
+    segments, words_by_segment, duration = _transcribe_dropping_dictation(media_path, language)
 
     # Dedupe across the whole transcript at once (not per-segment) so a
     # collision spanning a segment boundary -- like a zero-duration word

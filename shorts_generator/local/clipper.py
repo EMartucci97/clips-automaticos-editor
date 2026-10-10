@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 from ..config import LOCAL_OUTPUT_DIR
-from .encoding import video_encode_args
+from .encoding import probe_display_video, video_encode_args
 from .editing import (
     _snap_forward,
     find_cut_segments,
@@ -51,14 +52,50 @@ def _ratio(aspect_ratio: str) -> float:
         return 9.0 / 16.0
 
 
+MAX_TRIM_PER_AXIS = 0.45
+
+
+def _trim_filter(source_path: str, trim: Optional[Dict]) -> Optional[str]:
+    """ffmpeg `crop=w:h:x:y` that drops the editor's edge trim (fractions 0-1
+    of the source frame per side: top/bottom/left/right), or None when there is
+    nothing to trim. Applied while cutting the subclip so every later stage
+    (manual framing, face tracking, split) sees the trimmed frame as the whole
+    frame and its normalized coordinates stay relative to it."""
+    if not trim:
+        return None
+    t, b, l, r = (
+        max(0.0, min(MAX_TRIM_PER_AXIS, float(trim.get(k) or 0.0)))
+        for k in ("top", "bottom", "left", "right")
+    )
+    if t + b + l + r <= 1e-6:
+        return None
+    src_w, src_h = _ffprobe_resolution(source_path)
+    x = int(round(src_w * l))
+    y = int(round(src_h * t))
+    w = int(round(src_w * (1.0 - l - r)))
+    h = int(round(src_h * (1.0 - t - b)))
+    w = max(2, w - (w % 2))
+    h = max(2, h - (h % 2))
+    x = max(0, min(src_w - w, x))
+    y = max(0, min(src_h - h, y))
+    return f"crop={w}:{h}:{x}:{y}"
+
+
 def _cut_subclip(source_path: str, start: float, end: float, out_path: str,
-                 intermediate: bool = False) -> str:
-    """ffmpeg -ss start -to end → re-encoded mp4 with audio."""
+                 intermediate: bool = False, trim: Optional[Dict] = None) -> str:
+    """ffmpeg -ss start -t dur → re-encoded mp4 with audio.
+
+    -ss MUST come before -i (input seek): placed after -i, ffmpeg decodes the
+    whole source from t=0 up to `start` — on a 55-min HEVC podcast a clip at
+    minute 40 took ~166s instead of ~9s. Input seek is still frame-accurate
+    here because we re-encode (accurate_seek drops the pre-roll frames)."""
+    trim_vf = _trim_filter(source_path, trim)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
-        "-i", source_path,
         "-ss", f"{start:.3f}",
-        "-to", f"{end:.3f}",
+        "-i", source_path,
+        "-t", f"{end - start:.3f}",
+        *(["-vf", trim_vf] if trim_vf else []),
         *video_encode_args(intermediate),
         "-c:a", "aac", "-b:a", "128k",
         out_path,
@@ -74,6 +111,7 @@ def _cut_subclip_multi(
     cut_segments: List[Tuple[float, float]],
     out_path: str,
     intermediate: bool = False,
+    trim: Optional[Dict] = None,
 ) -> str:
     """Like `_cut_subclip`, but also removes each (start, end) clip-relative
     span in `cut_segments` (silence gaps / filler words -- see editing.py) in
@@ -83,14 +121,20 @@ def _cut_subclip_multi(
     duration = end - start
     keep = keep_segments_from_cuts(cut_segments, duration)
     if not keep or (len(keep) == 1 and keep[0][0] <= 1e-6 and keep[0][1] >= duration - 1e-6):
-        return _cut_subclip(source_path, start, end, out_path, intermediate)
+        return _cut_subclip(source_path, start, end, out_path, intermediate, trim=trim)
 
+    trim_vf = _trim_filter(source_path, trim)
+    trim_chain = f",{trim_vf}" if trim_vf else ""
+    # Input-seek a little before `start` (see _cut_subclip) so ffmpeg doesn't
+    # decode the source from t=0; after an input seek the stream timestamps
+    # restart at 0 at `seek`, so the trims are relative to it.
+    seek = max(0.0, start - 2.0)
     filter_parts = []
     concat_inputs = []
     for i, (s, e) in enumerate(keep):
-        abs_s, abs_e = start + s, start + e
+        abs_s, abs_e = start - seek + s, start - seek + e
         filter_parts.append(
-            f"[0:v]trim=start={abs_s:.3f}:end={abs_e:.3f},setpts=PTS-STARTPTS[v{i}];"
+            f"[0:v]trim=start={abs_s:.3f}:end={abs_e:.3f},setpts=PTS-STARTPTS{trim_chain}[v{i}];"
             f"[0:a]atrim=start={abs_s:.3f}:end={abs_e:.3f},asetpts=PTS-STARTPTS[a{i}];"
         )
         concat_inputs.append(f"[v{i}][a{i}]")
@@ -102,6 +146,8 @@ def _cut_subclip_multi(
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
+        "-ss", f"{seek:.3f}",
+        "-t", f"{end - seek + 0.5:.3f}",  # input option: stop reading past `end`
         "-i", source_path,
         "-filter_complex", filter_complex,
         "-map", "[outv]", "-map", "[outa]",
@@ -418,6 +464,19 @@ def mux_enhanced_audio(in_path: str, enhanced_wav: str, out_path: str) -> str:
     return out_path
 
 
+def apply_voice_gain(in_path: str, gain: float, out_path: str) -> str:
+    """Sube/baja el audio principal del clip (la voz) por `gain` (1.0 = igual).
+    alimiter evita que un gain > 1 sature los picos. Video copiado."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", in_path,
+         "-map", "0:v", "-map", "0:a?",
+         "-af", f"volume={gain:.3f},alimiter=limit=0.97:level=disabled",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", out_path],
+        check=True,
+    )
+    return out_path
+
+
 _preview_locks: Dict[str, threading.Lock] = {}
 _preview_locks_guard = threading.Lock()
 
@@ -427,8 +486,54 @@ def _preview_key_lock(key: str) -> threading.Lock:
         return _preview_locks.setdefault(key, threading.Lock())
 
 
+def _music_segments_filter(segments: list, duration: float, volume: float,
+                           fade_seconds: float) -> Optional[str]:
+    """filter_complex chunk that builds [music] from the looped input 1 using
+    the editor's music segments ({start, end|None, src_in}, in output
+    seconds). Each segment plays the track from src_in, delayed to start.
+    Returns None when no segment falls inside the output."""
+    segs = []
+    for sg in segments:
+        st = max(0.0, float(sg.get("start", 0) or 0))
+        en = sg.get("end")
+        en = duration if en is None else min(float(en), duration)
+        if en - st < 0.05:
+            continue
+        # Volumen propio del tramo; sin el campo, el general de la música.
+        vol = volume if sg.get("volume") is None else max(0.0, min(1.0, float(sg["volume"])))
+        segs.append((st, en, max(0.0, float(sg.get("src_in", 0) or 0)), vol))
+    if not segs:
+        return None
+    parts = [f"[1:a]asplit={len(segs)}" + "".join(f"[ms{i}]" for i in range(len(segs)))
+             if len(segs) > 1 else "[1:a]anull[ms0]"]
+    labels = []
+    for i, (st, en, src_in, vol) in enumerate(segs):
+        length = en - st
+        # Fade-in largo solo cuando arranca la canción desde cero en el 0
+        # (comportamiento histórico); los cortes intermedios llevan fades
+        # cortos para que no hagan click.
+        fin = fade_seconds if (st < 0.01 and src_in < 0.01) else min(0.03, length / 4)
+        fout = min(0.03, length / 4) if en < duration - 0.01 else 0
+        chain = (f"[ms{i}]atrim={src_in}:{src_in + length},asetpts=PTS-STARTPTS,"
+                 f"afade=t=in:st=0:d={fin}")
+        if fout:
+            chain += f",afade=t=out:st={length - fout}:d={fout}"
+        chain += f",volume={vol}"
+        ms = int(round(st * 1000))
+        if ms:
+            chain += f",adelay={ms}:all=1"
+        parts.append(chain + f"[mc{i}]")
+        labels.append(f"[mc{i}]")
+    if len(labels) > 1:
+        parts.append("".join(labels) + f"amix=inputs={len(labels)}:duration=longest:"
+                     f"dropout_transition=0:normalize=0[music]")
+    else:
+        parts.append(f"{labels[0]}anull[music]")
+    return ";".join(parts)
+
+
 def mix_background_music(in_path: str, music_path: str, volume: float, out_path: str,
-                          fade_seconds: float = 1.0) -> str:
+                          fade_seconds: float = 1.0, segments: Optional[list] = None) -> str:
     """Loops `music_path` under in_path's existing audio via ffmpeg amix,
     trimmed to in_path's duration with a short fade-in so the loop seam
     doesn't click. No fade-out is applied at the end -- the music holds its
@@ -439,9 +544,18 @@ def mix_background_music(in_path: str, music_path: str, volume: float, out_path:
     # normalize=0 keeps the clip's own voice track at its original level --
     # amix's default normalize=1 would divide every input's volume by the
     # input count, quietly ducking the dialogue just from adding a track.
+    music_chain = None
+    if segments is not None:
+        music_chain = _music_segments_filter(segments, duration, volume, fade_seconds)
+        if music_chain is None:
+            # Todos los tramos borrados: el clip sale sin música.
+            shutil.copyfile(in_path, out_path)
+            return out_path
+    if music_chain is None:
+        music_chain = (f"[1:a]atrim=0:{duration},afade=t=in:st=0:d={fade_seconds},"
+                       f"volume={volume}[music]")
     filter_complex = (
-        f"[1:a]atrim=0:{duration},afade=t=in:st=0:d={fade_seconds},"
-        f"volume={volume}[music];"
+        f"{music_chain};"
         f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
     )
     cmd = [
@@ -459,21 +573,14 @@ def mix_background_music(in_path: str, music_path: str, volume: float, out_path:
 
 
 def _ffprobe_video_info(path: str) -> Tuple[int, int, float]:
-    """(width, height, fps) of a media file's first video stream, via ffprobe."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate",
-            "-of", "csv=p=0",
-            path,
-        ],
-        capture_output=True, text=True, check=True,
-    )
-    w_str, h_str, fps_str = result.stdout.strip().split(",")
-    num, den = fps_str.split("/")
-    fps = float(num) / float(den) if float(den) else 30.0
-    return int(w_str), int(h_str), fps
+    """(width, height, fps) of a media file's first video stream, ya rotado
+    como lo decodifica ffmpeg (ver probe_display_video)."""
+    w, h, fps_str = probe_display_video(path)
+    fps = 30.0
+    if fps_str and "/" in fps_str:
+        num, den = fps_str.split("/")
+        fps = float(num) / float(den) if float(den) else 30.0
+    return w, h, fps
 
 
 # Safe area for the CTA outro, as fractions of the frame. Traced from the
@@ -774,6 +881,7 @@ def append_blurred_cta_outro(
     outro_clip_path: Optional[str] = None,
     cta_text: Optional[dict] = None,
     portada_path: Optional[str] = None,
+    trim: Optional[Dict] = None,
 ) -> str:
     """Appends a CTA outro after in_path's video+audio, made of the *actual
     following footage* from `source_path` (starting at `cta_start_time`,
@@ -809,11 +917,13 @@ def append_blurred_cta_outro(
     cta_png = out_path + ".ctatext.png"
     try:
         if own_raw_outro:
+            trim_vf = _trim_filter(source_path, trim)
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
                     "-ss", f"{cta_start_time:.3f}", "-i", source_path,
                     "-t", f"{duration}",
+                    *(["-vf", trim_vf] if trim_vf else []),
                     "-an",
                     *video_encode_args(intermediate=True),
                     raw_outro,
@@ -1027,6 +1137,234 @@ def _draw_soft_shadow(layer, blur_radius: int):
     return layer.filter(ImageFilter.GaussianBlur(blur_radius))
 
 
+def _crop_fracs(crop: Optional[dict]) -> Tuple[float, float, float, float]:
+    """(left, top, keep_w, keep_h) en fracciones; keep_* >= 0.1."""
+    c = crop or {}
+    g = lambda k: min(max(float(c.get(k) or 0.0), 0.0), 0.45)
+    left, right, top, bottom = g("left"), g("right"), g("top"), g("bottom")
+    return left, top, max(1 - left - right, 0.1), max(1 - top - bottom, 0.1)
+
+
+def _crop_box(w: int, h: int, crop: Optional[dict]) -> Tuple[int, int, int, int]:
+    left, top, kw, kh = _crop_fracs(crop)
+    x0, y0 = int(round(w * left)), int(round(h * top))
+    return x0, y0, max(x0 + int(round(w * kw)), x0 + 1), max(y0 + int(round(h * kh)), y0 + 1)
+
+
+def _hex_rgb(color: str) -> Tuple[int, int, int]:
+    try:
+        return tuple(int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, AttributeError):
+        return (255, 255, 255)
+
+
+def _rounded_mask_ring(px_w: int, px_h: int, radius_frac: float, border_px: float):
+    """(mascara, anillo) en modo L de px_w x px_h: rectangulo redondeado (radio =
+    radius_frac * ancho, tope medio lado corto) y borde de border_px hacia adentro
+    que sigue las esquinas; anillo None si no hay borde. None si no hay nada que
+    aplicar. Supersampling x4 para bordes suaves."""
+    from PIL import Image as PILImage, ImageDraw
+
+    ss = 4
+    W, H = px_w * ss, px_h * ss
+    rad = min(max(radius_frac, 0.0) * px_w, min(px_w, px_h) / 2) * ss
+    bpx = int(round(max(border_px, 0.0) * ss))
+    if rad <= 0 and bpx <= 0:
+        return None
+    mask = PILImage.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W - 1, H - 1], radius=rad, fill=255)
+    mask = mask.resize((px_w, px_h), PILImage.LANCZOS)
+    ring = None
+    if bpx > 0:
+        ring = PILImage.new("L", (W, H), 0)
+        ImageDraw.Draw(ring).rounded_rectangle([0, 0, W - 1, H - 1], radius=rad, outline=255, width=bpx)
+        ring = ring.resize((px_w, px_h), PILImage.LANCZOS)
+    return mask, ring
+
+
+TEXT_BOX_SCALE = 2   # se renderiza al doble de 1080 para que no se vea blando al agrandar
+
+
+def render_text_box_png(out_path: str, spec: dict) -> Tuple[int, int]:
+    """Capa de texto del editor: un cuadro con fondo (color + opacidad) y el
+    texto en Montserrat. Medidas de `spec` en px de un cuadro de 1080 de ancho;
+    el PNG sale a TEXT_BOX_SCALE x. `spec["spans"]` = [{s,e,size?,weight?,color?}]
+    pinta tramos del texto (indices de caracter) encima del estilo base. Respeta
+    los saltos de linea y corta por palabras al llegar a max_w; cada linea toma
+    el alto de su letra mas grande y todas las letras comparten linea de base.
+    Devuelve (ancho, alto) en px de 1080 (lo que usa el editor para el tamano)."""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+    from .subtitles import FONTS_DIR
+    k = TEXT_BOX_SCALE
+    pad = int(round(float(spec.get("pad", 24)) * k))
+    max_w = int(round(float(spec.get("max_w", 0.8)) * 1080 * k))
+    fonts = {}
+
+    def font_for(size, weight):
+        key = (size, weight)
+        if key not in fonts:
+            f = ImageFont.truetype(str(FONTS_DIR / "_source" / "Montserrat-Variable.ttf"), size)
+            try:
+                f.set_variation_by_axes([weight])
+            except Exception:
+                f = ImageFont.truetype(str(FONTS_DIR / "Montserrat-Black.ttf"), size)
+            fonts[key] = f
+        return fonts[key]
+
+    text = str(spec.get("text") or " ")
+    base = (int(round(float(spec.get("size", 64)) * k)), int(spec.get("weight", 900)),
+            str(spec.get("color") or "#ffffff"))
+    styles = [base] * len(text)
+    for sp in spec.get("spans") or []:
+        st = (int(round(float(sp["size"]) * k)) if sp.get("size") else None,
+              int(sp["weight"]) if sp.get("weight") else None, sp.get("color"))
+        for i in range(max(0, int(sp.get("s", 0))), min(len(text), int(sp.get("e", 0)))):
+            cur = styles[i]
+            styles[i] = tuple(n if n is not None else c for n, c in zip(st, cur))
+
+    def groups(chars):
+        # [(texto, estilo)] juntando caracteres consecutivos con el mismo estilo
+        out = []
+        for ch, st in chars:
+            if out and out[-1][1] == st:
+                out[-1][0].append(ch)
+            else:
+                out.append(([ch], st))
+        return [("".join(t), st) for t, st in out]
+
+    def width(chars):
+        return sum(font_for(st[0], st[1]).getlength(t) for t, st in groups(chars))
+
+    inner = max(max_w - 2 * pad, base[0])
+    lines = []   # cada linea: [(ch, estilo)]
+    pos = 0
+    for para in text.split("\n"):
+        chars = list(zip(para, styles[pos:pos + len(para)]))
+        pos += len(para) + 1
+        words, w = [], []
+        for c in chars:
+            if c[0] == " ":
+                words.append(w)
+                w = [c]      # el espacio viaja con la palabra siguiente
+            else:
+                w.append(c)
+        words.append(w)
+        cur = []
+        for word in words:
+            if cur and width(cur + word) > inner:
+                lines.append(cur)
+                cur = word[1:] if word and word[0][0] == " " else word
+            else:
+                cur = cur + word
+        lines.append(cur if cur else [("", base)])
+
+    laid = []
+    for ln in lines:
+        gs = [g for g in groups(ln) if g[0]] or [("", base)]
+        fs = [font_for(st[0], st[1]) for _, st in gs]
+        asc = max(f.getmetrics()[0] for f in fs)
+        desc = max(f.getmetrics()[1] for f in fs)
+        line_h = int(round(max(st[0] for _, st in gs) * 1.2))
+        laid.append((gs, fs, asc, desc, line_h, sum(f.getlength(t) for (t, _), f in zip(gs, fs))))
+    # El cuadro mide max_w de ancho (y min_h de alto si se pidio): la letra
+    # cambia el texto adentro, no el cuadro. Solo crece si el texto no entra
+    # (una palabra mas larga que el ancho o mas lineas que el alto).
+    text_w = max(1, int(math.ceil(max(l[5] for l in laid))))
+    content_h = sum(l[4] for l in laid)
+    W = max(max_w, text_w + 2 * pad)
+    H = max(int(round(float(spec.get("min_h", 0) or 0) * k)), content_h + 2 * pad)
+    bg = _hex_rgb(str(spec.get("bg") or "#000000"))
+    bg_a = int(round(min(max(float(spec.get("bg_op", 0.6)), 0.0), 1.0) * 255))
+    img = PILImage.new("RGBA", (W, H), bg + (bg_a,))
+    draw = ImageDraw.Draw(img)
+    align = spec.get("align") or "center"
+    y = (H - content_h) / 2
+    for gs, fs, asc, desc, line_h, lw in laid:
+        # Linea de base comun, centrada en la caja de line_h por ascent+descent
+        # de las fuentes (no del texto): mismas alturas con o sin acentos.
+        baseline = y + (line_h - (asc + desc)) / 2 + asc
+        x = pad if align == "left" else (W - pad - lw if align == "right" else (W - lw) / 2)
+        for (t, st), f in zip(gs, fs):
+            draw.text((x, baseline), t, font=f, fill=_hex_rgb(st[2]) + (255,), anchor="ls")
+            x += f.getlength(t)
+        y += line_h
+    img.save(out_path)
+    return int(round(W / k)), int(round(H / k))
+
+
+def style_overlay_png(
+    src: str,
+    out_path: str,
+    px_w: int,
+    radius_frac: float,
+    border_px: float,
+    color: str,
+    crop: Optional[dict] = None,
+) -> bool:
+    """Copia de una capa PNG recortada por `crop` ({top,bottom,left,right},
+    fracciones del original) y escalada a `px_w`, con esquinas redondeadas (radio =
+    radius_frac * ancho, tope medio lado corto) y un borde de `border_px` hacia
+    adentro que sigue las esquinas. Igual que el preview del editor. Supersampling
+    x4 para bordes suaves. False si no hay nada que aplicar o falla."""
+    from PIL import Image as PILImage, ImageChops
+
+    try:
+        with PILImage.open(src) as im:
+            im = im.convert("RGBA")
+            if crop:
+                box = _crop_box(im.width, im.height, crop)
+                im = im.crop(box)
+            px_h = max(int(round(px_w * im.height / max(im.width, 1))), 2)
+            im = im.resize((px_w, px_h), PILImage.LANCZOS)
+    except Exception:
+        return False
+    parts = _rounded_mask_ring(px_w, px_h, radius_frac, border_px)
+    if parts is None and not crop:
+        return False
+    mask, ring = parts or (None, None)
+    if mask is not None:
+        im.putalpha(ImageChops.multiply(im.getchannel("A"), mask))
+    if ring is not None:
+        solid = PILImage.new("RGBA", (px_w, px_h), _hex_rgb(color) + (255,))
+        solid.putalpha(ring)
+        im = PILImage.alpha_composite(im, solid)
+    im.save(out_path)
+    return True
+
+
+def render_border_png(
+    out_path: str,
+    frame_w: int,
+    frame_h: int,
+    width_frac: float,
+    color: str,
+    panes: int = 1,
+) -> bool:
+    """Full-frame transparent PNG with a solid ring of `color` along the edge
+    of each pane (1 = whole frame, 2 = the two stacked halves of the split
+    mode). The ring's thickness is `width_frac` of the frame width, drawn
+    inward, so the editor preview (same fraction of its own width) matches.
+    Returns False when there is nothing to draw."""
+    from PIL import Image as PILImage, ImageDraw
+
+    px = int(round(frame_w * max(0.0, float(width_frac))))
+    if px < 1:
+        return False
+    try:
+        rgb = tuple(int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, AttributeError):
+        rgb = (255, 255, 255)
+    img = PILImage.new("RGBA", (frame_w, frame_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    pane_h = frame_h // panes
+    for i in range(panes):
+        top = i * pane_h
+        bottom = frame_h - 1 if i == panes - 1 else top + pane_h - 1
+        draw.rectangle([0, top, frame_w - 1, bottom], outline=rgb + (255,), width=px)
+    img.save(out_path)
+    return True
+
+
 def render_template_block_png(
     out_path: str,
     frame_w: int,
@@ -1223,6 +1561,25 @@ def render_template_block_png(
     return out_path, block_w, out_h
 
 
+def extend_frozen_tail(in_path: str, out_path: str, seconds: float) -> str:
+    """Estira in_path `seconds` al final: el ultimo cuadro queda congelado
+    (tpad clone) y el audio sigue en silencio (apad). Es la "cola" de las capas
+    que el editor deja pasar del final del clip, para que burn_overlay_items
+    tenga donde dibujarlas (recorta todo a la duracion de su entrada)."""
+    seconds = max(float(seconds), 0.0)
+    has_audio = _has_audio_stream(in_path)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-vf", f"tpad=stop_mode=clone:stop_duration={seconds:.3f}",
+    ]
+    if has_audio:
+        cmd += ["-af", f"apad=pad_dur={seconds:.3f}", "-c:a", "aac", "-b:a", "128k"]
+    cmd += [*video_encode_args(intermediate=True), "-movflags", "+faststart", out_path]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
 def burn_overlay_items(
     in_path: str,
     out_path: str,
@@ -1258,13 +1615,30 @@ def burn_overlay_items(
     items = [it for it in (items or []) if it.get("png") and os.path.exists(it["png"])]
     if not items:
         return None
+    # A "video" item (capa de video) reuses the same keys, but `png` points at an
+    # H.264 mp4 that plays from its own `start` (no loop; when it ends the
+    # layer just disappears). Its audio is never used.
 
     frame_w, frame_h, _fps = _ffprobe_video_info(in_path)
     clip_duration = _ffprobe_duration(in_path)
     if not frame_w or not frame_h or clip_duration <= 0:
         return None
 
+    # Items whose window is empty are dropped up front: the loop below numbers
+    # ffmpeg inputs by position, so skipping one mid-loop would shift the rest.
+    def _visible(it):
+        st = max(float(it.get("start", 0.0) or 0.0), 0.0)
+        en = it.get("end")
+        en = clip_duration if en is None else min(float(en), clip_duration)
+        return en > st
+    items = [it for it in items if _visible(it)]
+    if not items:
+        return None
+
     inputs, chains, overlays = [], [], []
+    scratch = []   # mascaras/anillos temporales de capas de video
+    audio_tags = []   # capas de video con audio propio, ya retrasadas a su start
+    main_has_audio = _has_audio_stream(in_path)
     prev = "0:v"
     for idx, it in enumerate(items, start=1):
         start = max(float(it.get("start", 0.0) or 0.0), 0.0)
@@ -1274,6 +1648,10 @@ def burn_overlay_items(
             continue
         fade_in = max(float(it.get("fade_in", 0.3) or 0.0), 0.0)
         fade_out = max(float(it.get("fade_out", 0.5) or 0.0), 0.0)
+        # Una capa que llega al final del video no se desvanece: el fade dejaria
+        # ver el video de abajo en los ultimos cuadros (frame "colado" al final).
+        if end >= clip_duration - 0.05:
+            fade_out = 0.0
         span = end - start
         fade_in = min(fade_in, span / 2)
         fade_out = min(fade_out, span / 2)
@@ -1294,7 +1672,63 @@ def burn_overlay_items(
             anim = None
         anim_dur = min(max(float(it.get("anim_dur") or OVERLAY_ANIM_DEFAULT_SECONDS), 0.1), span)
 
+        is_video = bool(it.get("video"))
+        # Velocidad de la capa de video: `speed` s de archivo por s de clip.
+        speed = min(max(float(it.get("speed", 1.0) or 1.0), 0.25), 4.0) if is_video else 1.0
+        pts_f = (f"setpts=(PTS-STARTPTS)/{speed:.4f}+{start:.3f}/TB" if abs(speed - 1.0) > 1e-3
+                 else f"setpts=PTS-STARTPTS+{start:.3f}/TB")
+        if is_video:
+            # Si el archivo se termina antes que la ventana de la capa, se congela
+            # su ultimo cuadro: con eof_action=pass se colaria el video de abajo.
+            pts_f += f",tpad=stop_mode=clone:stop_duration={span + 0.5:.3f}"
+        ii = inputs.count("-i") + 1   # indice ffmpeg de la entrada de este item
+        extra_inputs = []
+        head = f"[{ii}:v]"
         base = ["format=rgba", f"scale={px_w}:-1:flags=lanczos"]
+        crop_f = None
+        if is_video and it.get("crop"):
+            # Encuadre de la capa: se recorta el original antes de escalar, asi
+            # px_w es el ancho de lo que queda (igual que en el editor).
+            cl, ct, ckw, ckh = _crop_fracs(it["crop"])
+            crop_f = (f"crop=trunc(iw*{ckw:.5f}/2)*2:trunc(ih*{ckh:.5f}/2)*2"
+                      f":trunc(iw*{cl:.5f}):trunc(ih*{ct:.5f})")
+        if is_video:
+            # Shift the layer's own timeline so its first frame lands at `start`.
+            base.insert(0, pts_f)
+            if crop_f:
+                base.insert(1, crop_f)
+            # Esquinas/borde de la capa de video: mascara (alphamerge) y anillo
+            # fijos de px_w x px_h, mismas cuentas que style_overlay_png.
+            vw, vh, _f = _ffprobe_video_info(it["png"])
+            if crop_f:
+                _l, _t, ckw, ckh = _crop_fracs(it["crop"])
+                vw, vh = int(vw * ckw) // 2 * 2, int(vh * ckh) // 2 * 2
+            px_h = max(int(round(px_w * vh / max(vw, 1))), 2)
+            parts = _rounded_mask_ring(px_w, px_h, float(it.get("radius") or 0.0),
+                                       frame_w * float(it.get("border_w") or 0.0))
+            if parts is not None:
+                from PIL import Image as PILImage
+                mask, ring = parts
+                mask_path = f"{out_path}.vm{idx}.png"
+                mask.save(mask_path)
+                scratch.append(mask_path)
+                extra_inputs += ["-loop", "1", "-t", f"{clip_duration:.3f}", "-i", mask_path]
+                chains.append(f"[{ii}:v]{pts_f},"
+                              f"{crop_f + ',' if crop_f else ''}format=rgba,"
+                              f"scale={px_w}:{px_h}:flags=lanczos[vs{idx}]")
+                chains.append(f"[{ii + 1}:v]format=gray[mk{idx}]")
+                chains.append(f"[vs{idx}][mk{idx}]alphamerge[vm{idx}]")
+                head = f"[vm{idx}]"
+                if ring is not None:
+                    ring_path = f"{out_path}.vr{idx}.png"
+                    solid = PILImage.new("RGBA", (px_w, px_h), _hex_rgb(str(it.get("border_color") or "#ffffff")) + (255,))
+                    solid.putalpha(ring)
+                    solid.save(ring_path)
+                    scratch.append(ring_path)
+                    extra_inputs += ["-loop", "1", "-t", f"{clip_duration:.3f}", "-i", ring_path]
+                    chains.append(f"[vm{idx}][{ii + 2}:v]overlay=0:0:format=auto[vr{idx}]")
+                    head = f"[vr{idx}]"
+                base = ["format=rgba"]
         if opacity < 1.0:
             base.append(f"colorchannelmixer=aa={opacity:.3f}")
 
@@ -1307,7 +1741,7 @@ def burn_overlay_items(
         fades = []
         if start > 0 or appear > 0:
             fades.append(f"fade=t=in:st={start:.3f}:d={max(appear, 0.001):.3f}:alpha=1")
-        if end < clip_duration - 0.01 or fade_out > 0:
+        if end < clip_duration - 0.05 or fade_out > 0:
             fades.append(f"fade=t=out:st={max(end - fade_out, start):.3f}"
                          f":d={max(fade_out, 0.001):.3f}:alpha=1")
 
@@ -1316,7 +1750,7 @@ def burn_overlay_items(
             # width or the same card would look twice as sharp on a 1920-wide
             # horizontal clip as on the 1080-wide vertical one.
             sigma = blur_sigma * frame_w / 1080.0
-            chains.append(f"[{idx}:v]{','.join(base)},split=2[sh{idx}][bl{idx}]")
+            chains.append(f"{head}{','.join(base)},split=2[sh{idx}][bl{idx}]")
             chains.append(f"[sh{idx}]{','.join(fades or ['null'])}[ov{idx}]")
             chains.append(
                 f"[bl{idx}]gblur=sigma={sigma:.2f}"
@@ -1331,7 +1765,7 @@ def burn_overlay_items(
                 z = (f"({OVERLAY_ANIM_ZOOM_FROM}+{1 - OVERLAY_ANIM_ZOOM_FROM:.3f}"
                      f"*(1-pow(1-max(0,min(1,(t-{start:.3f})/{anim_dur:.3f})),3)))")
                 tail.append(f"scale=w='iw*{z}':h='ih*{z}':eval=frame:flags=bilinear")
-            chains.append(f"[{idx}:v]{','.join(base + fades + tail)}[ov{idx}]")
+            chains.append(f"{head}{','.join(base + fades + tail)}[ov{idx}]")
             layers = [f"ov{idx}"]
 
         if slide_in > 0:
@@ -1355,13 +1789,46 @@ def burn_overlay_items(
                 dx = int(round(frame_w * OVERLAY_ANIM_TRAVEL_X)) * (-1 if anim == "slide_left" else 1)
                 x_expr = f"'{pos_x}+{dx}*{rest}'"
             elif anim == "zoom":
-                from PIL import Image as PILImage
-                with PILImage.open(it["png"]) as im:
-                    nat_h = px_w * im.height / max(im.width, 1)
+                if is_video:
+                    vw, vh, _f = _ffprobe_video_info(it["png"])
+                    if crop_f:
+                        _l, _t, ckw, ckh = _crop_fracs(it["crop"])
+                        vw, vh = vw * ckw, vh * ckh
+                    nat_h = px_w * vh / max(vw, 1)
+                else:
+                    from PIL import Image as PILImage
+                    with PILImage.open(it["png"]) as im:
+                        nat_h = px_w * im.height / max(im.width, 1)
                 x_expr = f"'{pos_x + px_w / 2:.1f}-w/2'"
                 y_expr = f"'{pos_y + nat_h / 2:.1f}-h/2'"
 
-        inputs += ["-loop", "1", "-t", f"{clip_duration:.3f}", "-i", it["png"]]
+        if is_video:
+            src_in = max(float(it.get("src_in", 0.0) or 0.0), 0.0)
+            volume = min(max(float(it.get("volume", 0.0) if it.get("volume") is not None else 0.0), 0.0), 2.0)
+            layer_audio = volume > 0.001 and _has_audio_stream(it["png"])
+            trim_args = ["-ss", f"{src_in:.3f}", "-t", f"{span * speed:.3f}"]
+            if layer_audio:
+                inputs += [*trim_args, "-i", it["png"]]
+                delay_ms = int(round(start * 1000))
+                # atempo acepta 0.5-2 por filtro: se encadena para 0.25x / 4x.
+                tempo, left = [], speed
+                while left > 2.0 + 1e-6:
+                    tempo.append("atempo=2.0"); left /= 2.0
+                while left < 0.5 - 1e-6:
+                    tempo.append("atempo=0.5"); left /= 0.5
+                if abs(left - 1.0) > 1e-3:
+                    tempo.append(f"atempo={left:.4f}")
+                chains.append(
+                    f"[{ii}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                    f"{''.join(t + ',' for t in tempo)}"
+                    f"volume={volume:.3f},adelay={delay_ms}|{delay_ms}[la{idx}]"
+                )
+                audio_tags.append(f"[la{idx}]")
+            else:
+                inputs += ["-an", *trim_args, "-i", it["png"]]
+        else:
+            inputs += ["-loop", "1", "-t", f"{clip_duration:.3f}", "-i", it["png"]]
+        inputs += extra_inputs
         for lay in layers:
             tag = f"bg{len(overlays) + 1}"
             overlays.append(
@@ -1371,20 +1838,45 @@ def burn_overlay_items(
             prev = tag
 
     if not chains:
+        for pth in scratch:
+            try:
+                os.remove(pth)
+            except OSError:
+                pass
         return None
 
-    filter_complex = ";".join(chains + overlays + [f"[{prev}]format=yuv420p[v]"])
+    tail = [f"[{prev}]format=yuv420p[v]"]
+    if audio_tags:
+        # El audio de las capas de video se suma al del clip; sin normalize para
+        # que el volumen elegido sea el que suena.
+        srcs = (["[0:a]"] if main_has_audio else []) + audio_tags
+        if len(srcs) == 1:
+            tail.append(f"{srcs[0]}anull[aout]")
+        else:
+            tail.append(f"{''.join(srcs)}amix=inputs={len(srcs)}:duration=first"
+                        f":dropout_transition=0:normalize=0[aout]")
+        audio_args = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        audio_args = ["-map", "0:a?", "-c:a", "copy"]
+    filter_complex = ";".join(chains + overlays + tail)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", in_path,
         *inputs,
         "-filter_complex", filter_complex,
-        "-map", "[v]", "-map", "0:a?",
+        "-map", "[v]",
         *video_encode_args(),
-        "-c:a", "copy",
+        *audio_args,
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        for pth in scratch:
+            try:
+                os.remove(pth)
+            except OSError:
+                pass
     return out_path
 
 
@@ -1585,6 +2077,7 @@ def crop_clip_local(
     shot_overrides: Optional[Dict[int, Union[int, List[int]]]] = None,
     cut_segments: Optional[List[Tuple[float, float]]] = None,
     crop_enabled: bool = True,
+    trim: Optional[Dict] = None,
 ) -> str:
     """Cut (+ optionally reframe) one highlight, returning the local mp4 path.
 
@@ -1604,17 +2097,17 @@ def crop_clip_local(
     matches the editor's "Recorte vertical" toggle being off."""
     if not crop_enabled:
         if cut_segments:
-            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, out_path)
+            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, out_path, trim=trim)
         else:
-            _cut_subclip(source_path, start_time, end_time, out_path)
+            _cut_subclip(source_path, start_time, end_time, out_path, trim=trim)
         return out_path
 
     cut_path = out_path + ".cut.mp4"
     try:
         if cut_segments:
-            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, cut_path, intermediate=True)
+            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, cut_path, intermediate=True, trim=trim)
         else:
-            _cut_subclip(source_path, start_time, end_time, cut_path, intermediate=True)
+            _cut_subclip(source_path, start_time, end_time, cut_path, intermediate=True, trim=trim)
         _reframe_vertical(cut_path, out_path, aspect_ratio, shot_overrides=shot_overrides)
     finally:
         if os.path.exists(cut_path):
@@ -1623,19 +2116,9 @@ def crop_clip_local(
 
 
 def _ffprobe_resolution(path: str) -> Tuple[int, int]:
-    """(width, height) of a video's first video stream, via ffprobe."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0:s=x",
-            path,
-        ],
-        capture_output=True, text=True, check=True,
-    )
-    w, h = result.stdout.strip().split("x")[:2]
-    return int(w), int(h)
+    """(width, height) of a video's first video stream, ya rotado."""
+    w, h, _ = probe_display_video(path)
+    return w, h
 
 
 def _manual_crop_rect(
@@ -1739,6 +2222,7 @@ def crop_clip_manual(
     keyframes: List[Dict],
     mode: str = "single",
     cut_segments: Optional[List[Tuple[float, float]]] = None,
+    trim: Optional[Dict] = None,
 ) -> str:
     """Cut one highlight and reframe it from the editor's *manual* crop
     rectangles, so the exported clip matches the vertical preview exactly.
@@ -1763,9 +2247,9 @@ def crop_clip_manual(
     cut_path = out_path + ".cut.mp4"
     try:
         if cut_segments:
-            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, cut_path, intermediate=True)
+            _cut_subclip_multi(source_path, start_time, end_time, cut_segments, cut_path, intermediate=True, trim=trim)
         else:
-            _cut_subclip(source_path, start_time, end_time, cut_path, intermediate=True)
+            _cut_subclip(source_path, start_time, end_time, cut_path, intermediate=True, trim=trim)
 
         src_w, src_h = _ffprobe_resolution(cut_path)
         out_w, out_h = _fit_crop_size(src_w, src_h, aspect_ratio)
